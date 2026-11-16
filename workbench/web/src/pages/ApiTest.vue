@@ -119,6 +119,13 @@
                     {{ st.result.error ? 'ERR' : st.result.status }}
                   </el-tag>
                   <span class="muted step-ms">{{ st.result.duration_ms }}ms</span>
+                  <span
+                    v-if="st.result.extracted && Object.keys(st.result.extracted).length"
+                    class="step-extract"
+                    :title="Object.entries(st.result.extracted).map(([k, v]) => k + ' = ' + v).join('\n')"
+                  >
+                    <el-icon><Right /></el-icon>{{ Object.keys(st.result.extracted).join(', ') }}
+                  </span>
                 </template>
                 <el-icon class="req-del" @click.stop="removeStep(st)"><Delete /></el-icon>
               </div>
@@ -194,6 +201,29 @@
                       <el-icon><Plus /></el-icon>添加 Header
                     </div>
                   </div>
+                </el-tab-pane>
+                <el-tab-pane name="extracts">
+                  <template #label>变量提取<span v-if="extractCount" class="tab-badge">{{ extractCount }}</span></template>
+                  <div class="kv-table">
+                    <div class="kv-head muted"><span class="c-key">变量名</span><span class="c-src">来源</span><span class="c-val">路径 / 名称</span><span class="c-op"></span></div>
+                    <div v-for="(e, ei) in stepForm.extracts" :key="ei" class="kv-row">
+                      <el-input v-model="e.name" placeholder="token" class="c-key" />
+                      <el-select v-model="e.source" class="c-src">
+                        <el-option value="body_json" label="响应 JSON" />
+                        <el-option value="header" label="响应 Header" />
+                        <el-option value="status" label="状态码" />
+                      </el-select>
+                      <el-input
+                        v-model="e.path" class="c-val mono"
+                        :placeholder="e.source === 'status' ? '（无需路径）' : (e.source === 'header' ? 'Header 名，如 content-type' : '点路径，如 data.token')"
+                      />
+                      <el-icon class="kv-del" @click="stepForm.extracts.splice(ei, 1)"><Delete /></el-icon>
+                    </div>
+                    <div class="kv-add" role="button" @click="stepForm.extracts.push({ name: '', source: 'body_json', path: '' })">
+                      <el-icon><Plus /></el-icon>添加提取规则
+                    </div>
+                  </div>
+                  <div class="extract-tip muted">运行流程时按本步骤响应提取变量并下传后续步骤，后续步骤以 <b>{{ '\{\{变量名\}\}' }}</b> 引用；提取值跨循环保留（如登录 token 只提取一次）。</div>
                 </el-tab-pane>
               </el-tabs>
 
@@ -663,6 +693,7 @@ const sendResp = ref(null)      // 单步发送的响应（仅测试，不落库
 const activeStep = computed(() => (current.value?.steps || []).find(s => s.id === activeStepId.value) || null)
 const paramCount = computed(() => (stepForm.value?.params || []).filter(p => p.enabled && p.key).length)
 const headerCount = computed(() => (stepForm.value?.headers || []).filter(h => h.enabled && h.key).length)
+const extractCount = computed(() => (stepForm.value?.extracts || []).filter(e => e.name && e.name.trim()).length)
 
 function openStepEditor(st) {
   activeStepId.value = st.id
@@ -677,6 +708,7 @@ function openStepEditor(st) {
     params: (s.params || []).map(p => ({ key: p.key || '', value: p.value || '', enabled: p.enabled ?? 1 })),
     body_type: s.body_type || 'none',
     body: s.body || '',
+    extracts: (s.extracts || []).map(e => ({ name: e.name || '', source: e.source || 'body_json', path: e.path || '' })),
   }
 }
 
@@ -835,8 +867,18 @@ onMounted(loadProjects)
 .kv-row .el-checkbox { margin: 0; }
 .c-key { width: 240px; flex-shrink: 0; }
 .c-val { flex: 1; min-width: 120px; }
+.c-src { width: 130px; flex-shrink: 0; }
 .kv-head .c-key { width: 240px; padding-left: 26px; }
+.kv-head .c-src { padding-left: 26px; }
 .kv-head .c-val { flex: 1; }
+.extract-tip { font-size: 12px; margin-top: 8px; line-height: 1.6; }
+.step-extract {
+  display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0;
+  font-size: 11px; color: var(--wb-accent); background: var(--wb-accent-soft, #eef2ff);
+  padding: 1px 6px; border-radius: 8px; max-width: 130px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default;
+}
+.step-extract .el-icon { font-size: 11px; }
 .kv-del { width: 26px; flex-shrink: 0; color: #d1d5db; cursor: pointer; }
 .kv-del:hover { color: #ef4444; }
 .kv-add { display: flex; align-items: center; gap: 4px; padding: 8px 12px; color: var(--wb-accent); font-size: 12px; cursor: pointer; border-top: 1px dashed #e2e8f0; user-select: none; }

@@ -441,6 +441,62 @@ def _env_variables(db: Session, env_id):
     return variables, e.name
 
 
+def _json_path_get(obj, path):
+    """按点路径取嵌套值，支持数组下标：data.token / data.list.0.id。"""
+    cur = obj
+    for part in str(path or "").split("."):
+        if not part:
+            continue
+        if isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                return None
+        elif isinstance(cur, dict):
+            if part not in cur:
+                return None
+            cur = cur[part]
+        else:
+            return None
+    return cur
+
+
+def _apply_extracts(extracts, res):
+    """EX-A4 变量提取：按步骤规则从响应提取变量。
+
+    规则结构：[{name: 变量名, source: body_json|header|status, path: 点路径或 Header 名}]
+    """
+    out = {}
+    parsed_body = None
+    body_parsed = False
+    for it in (extracts or []):
+        if not isinstance(it, dict) or not (it.get("name") or "").strip():
+            continue
+        name = it["name"].strip()
+        src = it.get("source") or "body_json"
+        path = (it.get("path") or "").strip()
+        val = None
+        if src == "status":
+            val = res.get("status")
+        elif src == "header":
+            for k, v in (res.get("headers") or {}).items():
+                if str(k).lower() == path.lower():
+                    val = v
+                    break
+        else:  # body_json
+            if not body_parsed:
+                try:
+                    parsed_body = json.loads(res.get("body") or "")
+                except Exception:
+                    parsed_body = None
+                body_parsed = True
+            if parsed_body is not None and path:
+                val = _json_path_get(parsed_body, path)
+        if val is not None:
+            out[name] = str(val)
+    return out
+
+
 # ---- 环境变量 ----
 class EnvBody(BaseModel):
     project_id: int
@@ -724,13 +780,18 @@ class SendBody(BaseModel):
 
 def _do_send(db: Session, *, project_id, environment_id, request_id,
              method, url, headers, query_params, body_type, body, auth,
-             write_history=True):
-    """发送核心（供调试端点与场景批量执行共用）：变量替换/拼接/认证/执行/历史落库。"""
+             write_history=True, extra_vars=None):
+    """发送核心（供调试端点与场景批量执行共用）：变量替换/拼接/认证/执行/历史落库。
+
+    extra_vars：运行级变量池（EX-A4 流程执行时前序步骤提取的变量），优先级高于环境变量。
+    """
     import base64
     import httpx
     from urllib.parse import quote
 
     variables, env_name = _env_variables(db, environment_id)
+    if extra_vars:
+        variables = {**variables, **extra_vars}
     # 环境变量替换 + Base URL 拼接（/ 开头时）
     if environment_id:
         e = db.get(wb.WbApiEnvironment, environment_id)
@@ -1069,6 +1130,8 @@ def update_scenario_step(sid: int, step_id: int, body: dict, db: Session = Depen
             "body_type": snap.get("body_type") or "none",
             "body": snap.get("body"),
             "auth": snap.get("auth"),
+            "extracts": [e for e in (snap.get("extracts") or [])
+                         if isinstance(e, dict) and (e.get("name") or "").strip()],
         }
     db.commit()
     return {"ok": True}
@@ -1100,6 +1163,7 @@ def run_api_scenario(sid: int, db: Session = Depends(get_db)):
         raise HTTPException(400, "场景中没有启用中的步骤")
     loops = max(1, min(s.loop_count or 1, 20))
     results = []
+    run_vars = {}   # EX-A4 运行级变量池：跨步骤、跨循环下传（如登录 token 只提取一次）
     t0 = time.perf_counter()
     for loop in range(1, loops + 1):
         for st in steps:
@@ -1112,6 +1176,7 @@ def run_api_scenario(sid: int, db: Session = Depends(get_db)):
                     url=snap.get("url"), headers=snap.get("headers"),
                     query_params=snap.get("params"), body_type=snap.get("body_type"),
                     body=snap.get("body"), auth=snap.get("auth"),
+                    extra_vars=run_vars,
                 )
                 name, method = snap.get("name") or "(未命名)", snap.get("method") or "GET"
             else:
@@ -1126,13 +1191,19 @@ def run_api_scenario(sid: int, db: Session = Depends(get_db)):
                     request_id=r.id, method=r.method, url=r.url,
                     headers=r.headers, query_params=r.params, body_type=r.body_type,
                     body=r.body, auth=r.auth,
+                    extra_vars=run_vars,
                 )
                 name, method = r.name, r.method
+            # EX-A4：按本步骤提取规则抽取变量，下传后续步骤
+            extracted = _apply_extracts(snap.get("extracts"), res)
+            if extracted:
+                run_vars.update(extracted)
             results.append({
                 "step_id": st.id, "name": name, "method": method, "url": res["url"],
                 "status": res["status"], "duration_ms": res["duration_ms"],
                 "size": res["size"], "error": res["error"], "loop": loop,
                 "history_id": res["history_id"],
+                "extracted": extracted,
             })
     total_ms = int((time.perf_counter() - t0) * 1000)
     ok_count = sum(1 for x in results if x["status"] and 200 <= x["status"] < 400 and not x["error"])

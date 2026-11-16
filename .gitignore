@@ -35,3 +35,6 @@ AGENTS.md
 # ---- 系统文件 ----
 .DS_Store
 Thumbs.db
+
+# ---- 白名单：工作坊配置随仓库上传（已确认） ----
+!workbench/base/.env
