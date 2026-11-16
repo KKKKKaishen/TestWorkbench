@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI智能测试平台</title>
+    <link rel="stylesheet" href="/static/css/register.css">
+</head>
+<body>
+    <div class="register-container">
+        <!-- 左侧装饰区域 -->
+        <div class="register-left">
+            <h2>接入智能测试平台</h2>
+            <p>开始您的智能测试之旅</p>
+            <p>专业工具，轻松管理</p>
+        </div>
+        
+        <!-- 右侧注册区域 -->
+        <div class="register-right">
+            <div class="register-form-container">
+                <div class="register-logo">
+                    <h1>创建账户</h1>
+                    <p>请填写注册信息</p>
+                </div>
+                
+                <!-- 错误消息 -->
+                <div id="errorMessage" class="error-message"></div>
+                
+                <!-- 成功消息 -->
+                <div id="successMessage" class="success-message"></div>
+                
+                <form id="registerForm" class="register-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="username">用户名 <span class="red">*</span></label>
+                            <input type="text" id="username" name="username" required placeholder="请输入用户名">
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="password">密码 <span class="red">*</span></label>
+                        <input type="password" id="password" name="password" required placeholder="请输入最少6位密码">
+                        <div class="password-requirements">建议使用至少6位字符，包含字母和数字</div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="confirmPassword">确认密码 <span class="red">*</span></label>
+                        <input type="password" id="confirmPassword" name="confirmPassword" required placeholder="请再次输入密码">
+                    </div>
+                    
+                    <button type="submit" id="registerButton" class="register-btn">注册</button>
+                    
+                    <div class="register-footer">
+                        已有账户？
+                        <a href="/login">立即登录</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/register.js"></script>
+</body>
+</html>

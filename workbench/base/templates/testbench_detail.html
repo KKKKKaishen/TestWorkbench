@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用例集详情 - AI智能测试平台</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/testbench.css">
+    <link rel="stylesheet" href="/static/css/nav.css">
+</head>
+<body>
+    {% set active_nav = 'testbench' %}
+    <div class="app-container">
+        {% include "partials/sidebar.html" %}
+
+        <main class="main-content">
+            <header class="tb-header">
+                <div class="tb-header-row">
+                    <h1 class="tb-title" id="setName">加载中...</h1>
+                    <span id="setVersion" class="badge badge-version"></span>
+                </div>
+                <p class="tb-subtitle" id="setMeta"></p>
+            </header>
+
+            <div class="detail-actions" id="detailActions">
+                <div class="owner-actions" id="ownerActions" hidden>
+                    <button id="editBtn" class="btn primary">编辑用例</button>
+                    <button id="aiEditBtn" class="btn">AI 修改</button>
+                    <button id="exportBtn" class="btn">导出 CSV</button>
+                </div>
+                <a href="/testbench" class="back-btn" data-tip="返回用例集列表"><i class="fas fa-arrow-left"></i> 返回列表</a>
+            </div>
+
+            <p id="readonlyHint" class="readonly-hint" hidden><i class="fas fa-eye"></i> 共享用例集，仅创建者可编辑</p>
+
+            <!-- 用例表（查看模式） -->
+            <section class="panel" id="casesPanel">
+                <div class="panel-title-row">
+                    <h2 class="panel-title">测试用例 <span id="viewingLabel" class="version-badge"></span></h2>
+                    <button id="backToCurrentBtn" class="btn small" hidden>返回当前版本</button>
+                </div>
+                <div class="table-wrap">
+                    <table id="casesTable" class="cases-table case-grid"></table>
+                </div>
+            </section>
+
+            <!-- 编辑模式 -->
+            <section class="panel" id="editorPanel" hidden>
+                <div class="panel-title-row">
+                    <h2 class="panel-title">编辑用例 <span class="version-badge">基于 v<span id="editorBaseVersion"></span></span></h2>
+                    <div class="btn-row">
+                        <button id="addCaseBtn" class="btn small">新增用例</button>
+                        <button id="cancelEditBtn" class="btn small">取消</button>
+                        <button id="saveBtn" class="btn small primary">保存新版本</button>
+                    </div>
+                </div>
+                <div class="editor-note">
+                    <label for="editNote">编辑说明（可选）</label>
+                    <input type="text" id="editNote" placeholder="例如：补充锁定场景的边界值用例">
+                </div>
+                <p class="editor-tip">已有用例的编号不可修改；删除用例需点击用例卡片上的「删除」，保存时将作为显式删除提交。</p>
+                <div id="caseEditorList"></div>
+            </section>
+
+            <!-- AI 修改 -->
+            <section class="panel" id="aiPanel" hidden>
+                <div class="panel-title-row">
+                    <h2 class="panel-title">AI 修改用例 <span class="version-badge">基于 v<span id="aiBaseVersion"></span></span></h2>
+                    <button id="aiCloseBtn" class="btn small">关闭</button>
+                </div>
+                <div class="editor-note">
+                    <label for="aiInstruction">修改指令</label>
+                    <textarea id="aiInstruction" rows="3" maxlength="2000"
+                        placeholder="例如：为所有密码错误场景补充边界值用例"></textarea>
+                    <div class="ai-generate-row">
+                        <button id="aiGenerateBtn" class="btn small primary">生成修改</button>
+                        <span id="aiGeneratingHint" class="ai-generating-hint" hidden>AI 正在修改用例，通常需要十几秒…</span>
+                    </div>
+                    <p class="editor-tip">AI 只修改与指令相关的用例，未涉及的用例原样保留；结果经你确认后才会保存为新版本（来源标记为「AI 修改」）。</p>
+                </div>
+                <div id="aiPreviewArea" hidden>
+                    <div class="panel-title-row">
+                        <h3 class="panel-title">当前版本 → AI 建议</h3>
+                        <button id="aiSaveBtn" class="btn small primary">保存为新版本</button>
+                    </div>
+                    <div id="aiTruncatedWarn" class="warn-banner" hidden>
+                        ⚠ AI 输出被截断，结果可能不完整，请检查后再确认
+                    </div>
+                    <div id="aiDiffView"></div>
+                    <div class="editor-note">
+                        <label for="aiNote">版本说明（可选，默认「AI 修改」）</label>
+                        <input type="text" id="aiNote" placeholder="AI 修改">
+                    </div>
+                </div>
+            </section>
+
+            <!-- 版本历史 -->
+            <section class="panel" id="versionsPanel">
+                <div class="panel-title-row">
+                    <h2 class="panel-title">版本历史</h2>
+                </div>
+                <ul id="versionList" class="version-list"></ul>
+                <div class="diff-controls">
+                    <label>对比</label>
+                    <select id="diffFrom"></select>
+                    <span>→</span>
+                    <select id="diffTo"></select>
+                    <button id="diffBtn" class="btn small">生成对比</button>
+                </div>
+            </section>
+
+            <!-- 版本对比结果 -->
+            <section class="panel" id="diffPanel" hidden>
+                <div class="panel-title-row">
+                    <h2 class="panel-title">版本对比 <span id="diffLabel" class="version-badge"></span></h2>
+                    <button id="closeDiffBtn" class="btn small">关闭对比</button>
+                </div>
+                <div id="diffView"></div>
+            </section>
+
+            <footer class="footer-note">
+                <p>© <span class="js-nav-year"></span> AI智能测试系统</p>
+            </footer>
+        </main>
+    </div>
+
+    <script>window.testCaseSetId = "{{ set_id }}";</script>
+    <script>window.canEdit = {{ 'true' if can_edit else 'false' }};</script>
+    <script src="/static/js/nav.js"></script>
+    <script src="/static/js/common.js"></script>
+    <script src="/static/js/testbench_detail.js"></script>
+</body>
+</html>

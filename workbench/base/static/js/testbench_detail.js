@@ -1,0 +1,842 @@
+// 测试用例集详情页：用例查看/编辑、版本历史、回滚、版本对比
+const state = {
+    setId: window.testCaseSetId,
+    canEdit: window.canEdit === true,
+    asset: null,
+    currentContent: null,
+    versions: [],
+};
+
+// 版本查看的请求序号：连点多个版本时丢弃过期响应，避免表格内容与标签版本号不一致
+let versionViewSeq = 0;
+
+// 编辑态：任何新版本都基于进入编辑时的当前版本（base_version 乐观锁）
+const editor = {
+    active: false,
+    baseVersion: null,
+    cases: [],
+    deletedCaseIds: [],
+    dirty: false,  // 卡片里是否已有未保存的输入（用于退出/切到 AI 修改前提示）
+};
+
+const SOURCE_TYPE_LABELS = {
+    publish: "发布",
+    manual_edit: "人工编辑",
+    rollback: "回滚",
+    ai_edit: "AI 修改",
+};
+
+const FIELD_LABELS = {
+    title: "测试标题",
+    preconditions: "前置条件",
+    steps: "操作步骤",
+    test_data: "测试数据",
+    expected_results: "预期结果",
+    priority: "优先级",
+    automation: "自动化",
+    requirement_refs: "需求追溯",
+    test_point_refs: "测试点追溯",
+    covered_items: "覆盖项",
+    rationale: "覆盖说明",
+};
+
+const CASE_TABLE_HEADERS = ["用例编号", "测试标题", "前置条件", "操作步骤", "测试数据", "预期结果", "优先级", "自动化", "需求追溯", "测试点/覆盖项", "覆盖说明"];
+
+const el = {};
+["setName", "setVersion", "setMeta", "detailActions", "ownerActions", "editBtn",
+ "exportBtn", "readonlyHint", "casesPanel", "viewingLabel",
+ "backToCurrentBtn", "casesTable", "editorPanel", "editorBaseVersion", "addCaseBtn",
+ "cancelEditBtn", "saveBtn", "editNote", "caseEditorList", "versionsPanel", "versionList",
+ "diffFrom", "diffTo", "diffBtn", "diffPanel", "diffLabel", "closeDiffBtn", "diffView",
+ "aiEditBtn", "aiPanel", "aiBaseVersion", "aiInstruction", "aiGenerateBtn", "aiCloseBtn",
+ "aiGeneratingHint", "aiPreviewArea", "aiSaveBtn", "aiTruncatedWarn", "aiDiffView", "aiNote",
+].forEach((id) => { el[id] = document.getElementById(id); });
+
+document.addEventListener("DOMContentLoaded", init);
+
+async function init() {
+    el.editBtn.addEventListener("click", enterEditMode);
+    el.aiEditBtn.addEventListener("click", enterAiEdit);
+    el.aiCloseBtn.addEventListener("click", exitAiEdit);
+    el.aiGenerateBtn.addEventListener("click", generateAiEdit);
+    el.aiSaveBtn.addEventListener("click", confirmAiEdit);
+    el.exportBtn.addEventListener("click", exportCsv);
+    el.backToCurrentBtn.addEventListener("click", backToCurrent);
+    el.addCaseBtn.addEventListener("click", addCase);
+    el.cancelEditBtn.addEventListener("click", () => exitEditMode());
+    el.saveBtn.addEventListener("click", saveEdit);
+    // 卡片输入即标记脏：退出编辑 / 切到 AI 修改前可据此提示未保存内容
+    el.caseEditorList.addEventListener("input", markEditorDirty);
+    el.caseEditorList.addEventListener("change", markEditorDirty);
+    el.diffBtn.addEventListener("click", renderDiff);
+    el.closeDiffBtn.addEventListener("click", () => { el.diffPanel.hidden = true; });
+
+    el.ownerActions.hidden = !state.canEdit;
+    el.readonlyHint.hidden = state.canEdit;
+
+    await loadDetail();
+    await loadVersions();
+}
+
+function formatPriorityStats(stats) {
+    const s = stats || {};
+    return `P0:${s.P0 ?? 0} / P1:${s.P1 ?? 0} / P2:${s.P2 ?? 0} / P3:${s.P3 ?? 0}`;
+}
+
+function formatTime(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    return isNaN(date.getTime()) ? "-" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+// 公共工具（showMessage / apiFetch / redirectToLogin）来自 common.js
+
+// ---------- 数据加载 ----------
+
+async function loadDetail() {
+    const response = await apiFetch(`/api/test-sets/${state.setId}`);
+    if (!response.ok) {
+        showMessage("加载用例集失败", "error");
+        return;
+    }
+    state.asset = await response.json();
+    state.currentContent = state.asset.current_content || { test_cases: [] };
+    renderHeader();
+    renderCases(state.currentContent.test_cases || []);
+    el.viewingLabel.textContent = `v${state.asset.current_version}`;
+}
+
+async function loadVersions() {
+    const response = await apiFetch(`/api/test-sets/${state.setId}/versions`);
+    if (!response.ok) return;
+    state.versions = await response.json();
+    renderVersions();
+    fillDiffSelects();
+}
+
+// ---------- 头部与操作 ----------
+
+function renderHeader() {
+    const asset = state.asset;
+    el.setName.textContent = asset.name;
+    el.setVersion.textContent = `v${asset.current_version}`;
+    el.setVersion.className = "badge badge-version";
+
+    el.setMeta.innerHTML = "";
+    const facts = [`用例总数：${asset.case_count} | 用例分布：${formatPriorityStats(asset.priority_stats)}`];
+    if (!asset.is_mine) facts.push(`创建者：${asset.owner_username || "未知用户"}`);
+    if (asset.source_workflow_id) facts.push("来自测试工作流");
+    facts.push(`更新于 ${formatTime(asset.updated_at)}`);
+    facts.forEach((text, index) => {
+        if (index > 0) el.setMeta.appendChild(document.createTextNode(" · "));
+        el.setMeta.appendChild(document.createTextNode(text));
+    });
+    if (asset.description) {
+        el.setMeta.appendChild(document.createElement("br"));
+        el.setMeta.appendChild(document.createTextNode(asset.description));
+    }
+
+}
+
+function exportCsv() {
+    window.location.href = `/api/test-sets/${state.setId}/export`;
+}
+
+// ---------- 用例表（查看模式） ----------
+
+function renderCases(cases) {
+    const table = el.casesTable;
+    table.innerHTML = "";
+
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    CASE_TABLE_HEADERS.forEach((text) => {
+        const th = document.createElement("th");
+        th.textContent = text;
+        headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    cases.forEach((c) => {
+        const tr = document.createElement("tr");
+        const cells = [
+            c.id,
+            c.title,
+            (c.preconditions || []).join("\n"),
+            (c.steps || []).map((s, i) => `${i + 1}. ${s}`).join("\n"),
+            c.test_data || "",
+            (c.expected_results || []).join("\n"),
+            c.priority,
+            c.automation,
+            (c.requirement_refs || []).join(", "),
+            formatTestCaseTrace(c.test_point_refs, c.covered_items),
+            c.rationale || "",
+        ];
+        cells.forEach((value) => {
+            const td = document.createElement("td");
+            // 长文本列（操作步骤/测试数据/预期结果/覆盖说明等）折叠并可展开，见 common.js
+            fillCaseCell(td, value);
+            tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+}
+
+async function viewVersion(version) {
+    const seq = ++versionViewSeq;
+    const response = await apiFetch(`/api/test-sets/${state.setId}/versions/${version}`);
+    if (seq !== versionViewSeq) return;  // 期间又点了别的版本：丢弃过期响应
+    if (!response.ok) return showMessage("加载历史版本失败", "error");
+    const data = await response.json();
+    if (seq !== versionViewSeq) return;
+    renderCases((data.content && data.content.test_cases) || []);
+    const isCurrent = version === state.asset.current_version;
+    el.viewingLabel.textContent = isCurrent ? `v${version}` : `v${version}（历史版本）`;
+    el.backToCurrentBtn.hidden = isCurrent;
+}
+
+function backToCurrent() {
+    versionViewSeq += 1;  // 使在途的版本查看响应作废，避免回写到"当前版本"视图
+    renderCases(state.currentContent.test_cases || []);
+    el.viewingLabel.textContent = `v${state.asset.current_version}`;
+    el.backToCurrentBtn.hidden = true;
+}
+
+// ---------- 编辑模式 ----------
+
+function enterEditMode() {
+    editor.active = true;
+    editor.baseVersion = state.asset.current_version;
+    editor.cases = (state.currentContent.test_cases || []).map((c) => ({ ...c, isNew: false }));
+    editor.deletedCaseIds = [];
+    editor.dirty = false;
+    el.editorBaseVersion.textContent = editor.baseVersion;
+    el.editNote.value = "";
+    el.casesPanel.hidden = true;
+    el.editorPanel.hidden = false;
+    el.aiPanel.hidden = true;  // 与 AI 修改互斥
+    renderEditor();
+}
+
+function markEditorDirty() {
+    if (editor.active) editor.dirty = true;
+}
+
+// 重渲染前把卡片里未提交的输入回收进模型：addCase/removeCase 会整表重建编辑器，
+// 不回收就会丢掉其他卡片刚输入的内容
+function syncEditorFromDom() {
+    if (!editor.active) return;
+    if (el.caseEditorList.querySelectorAll(".case-edit-card").length === 0) return;
+    editor.cases = collectEditorCases();
+}
+
+// force=true 用于"已保存/已确认放弃"的路径，不弹确认
+function exitEditMode(options = {}) {
+    if (!options.force && editor.dirty
+        && !confirm(options.confirmMessage || "退出编辑将丢弃未保存的用例修改，是否继续？")) {
+        return false;
+    }
+    editor.active = false;
+    editor.dirty = false;
+    el.editorPanel.hidden = true;
+    el.casesPanel.hidden = false;
+    return true;
+}
+
+// ---------- AI 修改（两段式：生成建议 → diff 确认，D-017） ----------
+
+const aiEdit = { baseVersion: null, proposed: null };
+
+function enterAiEdit() {
+    // 手工编辑会话里可能已有未保存内容：退出编辑前必须确认，不能静默丢弃
+    if (editor.active
+        && !exitEditMode({
+            confirmMessage: "进入 AI 修改会退出当前编辑，未保存的用例修改将丢失。是否继续？",
+        })) {
+        return;
+    }
+    aiEdit.baseVersion = state.asset.current_version;
+    aiEdit.proposed = null;
+    el.aiBaseVersion.textContent = aiEdit.baseVersion;
+    el.aiPreviewArea.hidden = true;
+    el.aiTruncatedWarn.hidden = true;
+    el.casesPanel.hidden = true;
+    el.editorPanel.hidden = true;
+    el.aiPanel.hidden = false;
+    el.aiPanel.scrollIntoView({ behavior: "smooth" });
+}
+
+function exitAiEdit() {
+    el.aiPanel.hidden = true;
+    el.aiPreviewArea.hidden = true;
+    el.casesPanel.hidden = false;
+}
+
+async function generateAiEdit() {
+    const instruction = el.aiInstruction.value.trim();
+    if (!instruction) return showMessage("请先输入修改指令", "error");
+
+    el.aiGenerateBtn.disabled = true;
+    el.aiGeneratingHint.hidden = false;
+    try {
+        const response = await apiFetch(`/api/test-sets/${state.setId}/ai-edit/preview`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ instruction }),
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            return showMessage(data.error || "AI 修改失败，请稍后重试", "error");
+        }
+        const payload = await response.json();
+        aiEdit.baseVersion = payload.base_version;
+        aiEdit.proposed = payload.proposed;
+        el.aiBaseVersion.textContent = payload.base_version;
+        el.aiTruncatedWarn.hidden = !payload.truncated;
+        renderDiffInto(el.aiDiffView, payload.diff);
+        el.aiPreviewArea.hidden = false;
+    } catch (error) {
+        if (error.message !== "未登录") {
+            console.error("AI 修改失败:", error);
+            showMessage("AI 修改失败，请稍后重试", "error");
+        }
+    } finally {
+        el.aiGenerateBtn.disabled = false;
+        el.aiGeneratingHint.hidden = true;
+    }
+}
+
+async function confirmAiEdit() {
+    if (!aiEdit.proposed) return;
+    el.aiSaveBtn.disabled = true;
+    try {
+        const response = await apiFetch(`/api/test-sets/${state.setId}/ai-edit/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                content: aiEdit.proposed,
+                base_version: aiEdit.baseVersion,
+                note: el.aiNote.value.trim() || null,
+            }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.status === 409) {
+            return showMessage("用例集已被其他人修改，AI 建议已过期，请重新生成", "error");
+        }
+        if (!response.ok) {
+            return showMessage(data.error || "保存失败", "error");
+        }
+        exitAiEdit();
+        await loadDetail();
+        await loadVersions();
+        showMessage(`已保存为新版本 v${data.version.version}（AI 修改）`, "success");
+    } catch (error) {
+        if (error.message !== "未登录") {
+            console.error("保存 AI 修改失败:", error);
+            showMessage("保存失败，请稍后重试", "error");
+        }
+    } finally {
+        el.aiSaveBtn.disabled = false;
+    }
+}
+
+function suggestNextId() {
+    const existing = new Set(editor.cases.map((c) => c.id));
+    let prefix = "TC-NEW";
+    let maxNum = 0;
+    let width = 3;
+    editor.cases.forEach((c) => {
+        const match = c.id.match(/^(.*?)(\d+)$/);
+        if (match) {
+            const num = parseInt(match[2], 10);
+            if (num > maxNum) {
+                maxNum = num;
+                width = match[2].length;
+                prefix = match[1];
+            }
+        }
+    });
+    let candidate = `${prefix}${String(maxNum + 1).padStart(width, "0")}`;
+    while (existing.has(candidate)) {
+        maxNum += 1;
+        candidate = `${prefix}${String(maxNum + 1).padStart(width, "0")}`;
+    }
+    return candidate;
+}
+
+function addCase() {
+    syncEditorFromDom();  // 先回收其他卡片的未提交输入，再重建
+    const emptyCase = {
+        id: suggestNextId(),
+        title: "",
+        preconditions: [],
+        steps: [],
+        test_data: "",
+        expected_results: [],
+        priority: "P1",
+        automation: "Manual",
+        requirement_refs: [],
+        test_point_refs: [],
+        covered_items: [],
+        rationale: "",
+        isNew: true,
+    };
+    editor.cases.push(emptyCase);
+    editor.dirty = true;
+    renderEditor();
+    // 新增的用例直接展开，省掉"先展开再输入"这一步
+    const card = el.caseEditorList.querySelector(`.case-edit-card[data-index="${editor.cases.length - 1}"]`);
+    if (card) {
+        setCardCollapsed(card, false);
+        const first = card.querySelector("input");
+        if (first) first.focus();
+    }
+}
+
+function removeCase(index) {
+    syncEditorFromDom();  // 必须在 splice 之前：splice 会改变下标与卡片的对应关系
+    const target = editor.cases[index];
+    if (!target) return;
+    if (!target.isNew) editor.deletedCaseIds.push(target.id);
+    editor.cases.splice(index, 1);
+    editor.dirty = true;
+    renderEditor();
+}
+
+function renderEditor() {
+    const list = el.caseEditorList;
+    list.innerHTML = "";
+    editor.cases.forEach((c, index) => {
+        list.appendChild(renderCaseEditorCard(c, index));
+    });
+    if (editor.cases.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "editor-tip";
+        empty.textContent = "当前没有用例。可点击「新增用例」，或取消编辑后回滚到历史版本。";
+        list.appendChild(empty);
+    }
+    if (editor.deletedCaseIds.length > 0) {
+        const tip = document.createElement("p");
+        tip.className = "editor-tip delete-tip";
+        tip.textContent = `本次显式删除的用例编号：${editor.deletedCaseIds.join("、")}`;
+        list.appendChild(tip);
+    }
+}
+
+/* 用例编辑卡片：与工作流详情的测试点/需求分析共用同一套折叠卡片语言（nav.css 的 .edit-*）。
+   默认只显示一行摘要（编号 + 标题 + 优先级·自动化 + 步骤摘要），点「展开」才出现字段——
+   一个用例有 4 个多行字段，几十条用例全展开就是一整屏输入框。折叠机制在 common.js，
+   收起时由 card.syncSummary 回调把最新值写回摘要行。 */
+function caseStepExcerpt(c) {
+    const steps = c.steps || [];
+    if (steps.length) {
+        const head = steps.slice(0, 2).join(" → ");
+        return `步骤：${head}${steps.length > 2 ? `…（共 ${steps.length} 步）` : ""}`;
+    }
+    const expected = c.expected_results || [];
+    return expected.length ? `预期：${expected[0]}` : "（未填步骤）";
+}
+
+function caseSummary(card) {
+    const value = (sub) => {
+        const el = card.querySelector(`[data-sub="${sub}"]`);
+        return el ? (el.value || "").trim() : "";
+    };
+    const id = card.querySelector(".edit-summary-id");
+    const title = card.querySelector(".edit-summary-title");
+    const props = card.querySelector(".edit-summary-props");
+    const desc = card.querySelector(".edit-summary-desc");
+    if (id) id.textContent = value("id") || "编号待分配";
+    if (title) title.textContent = value("title") || "（未填标题）";
+    if (props) props.textContent = [value("priority"), value("automation")].filter(Boolean).join(" · ");
+    if (desc) {
+        const steps = splitLines(value("steps"));
+        const head = steps.slice(0, 2).join(" → ");
+        if (steps.length) {
+            desc.textContent = `步骤：${head}${steps.length > 2 ? `…（共 ${steps.length} 步）` : ""}`;
+        } else {
+            // 没有步骤时退回预期结果，与折叠时用 caseStepExcerpt 的画法保持一致
+            const expected = splitLines(value("expected_results"));
+            desc.textContent = expected.length ? `预期：${expected[0]}` : "（未填步骤）";
+        }
+    }
+}
+
+function renderCaseEditorCard(c, index) {
+    const deleteTip = c.isNew ? "移除这条新用例" : "删除该用例";
+    const card = document.createElement("div");
+    card.className = "edit-card case-edit-card collapsed";
+    card.dataset.index = index;
+    card.syncSummary = caseSummary;
+
+    // 折叠态：一行纯文本，没有任何输入框
+    const summary = document.createElement("div");
+    summary.className = "edit-summary";
+    summary.appendChild(summarySpan("edit-summary-id", c.id || "编号待分配"));
+    summary.appendChild(summarySpan("edit-summary-title", c.title || "（未填标题）"));
+    summary.appendChild(
+        summarySpan("edit-summary-props", `${c.priority || "P1"} · ${c.automation || "Manual"}`)
+    );
+    summary.appendChild(summarySpan("edit-summary-desc", caseStepExcerpt(c)));
+    summary.appendChild(buildCollapseToggle(card));
+    summary.appendChild(buildRowRemoveButton(card, deleteTip, () => removeCase(index)));
+    card.appendChild(summary);
+
+    // 展开态：编号（已有用例不可改，D-015）+ 测试标题一行，其余字段带标签
+    const body = document.createElement("div");
+    body.className = "edit-body";
+    const head = document.createElement("div");
+    head.className = "edit-head";
+    const idInput = editInput("id", c.id, "edit-input edit-id", "用例编号");
+    if (!c.isNew) {
+        idInput.disabled = true;
+        idInput.dataset.tip = "已有用例的编号不可修改";
+    }
+    head.appendChild(idInput);
+    head.appendChild(editInput("title", c.title, "edit-input edit-title", "测试标题"));
+    head.appendChild(buildCollapseToggle(card));
+    head.appendChild(buildRowRemoveButton(card, deleteTip, () => removeCase(index)));
+    body.appendChild(head);
+
+    const props = document.createElement("div");
+    props.className = "edit-props";
+    props.appendChild(editField("优先级", editSelect("priority", ["P0", "P1", "P2"], c.priority), true));
+    props.appendChild(editField("自动化", editSelect("automation", ["Manual", "Auto"], c.automation), true));
+    body.appendChild(props);
+
+    body.appendChild(
+        editField(
+            "需求追溯",
+            editInput("requirement_refs", (c.requirement_refs || []).join(", "), "edit-input", "如 REQ-001, REQ-002")
+        )
+    );
+    body.appendChild(
+        editField(
+            "测试点追溯",
+            editInput("test_point_refs", (c.test_point_refs || []).join(", "), "edit-input", "如 TP-001, TP-002")
+        )
+    );
+    body.appendChild(
+        editField(
+            "覆盖项",
+            editInput("covered_items", (c.covered_items || []).join(", "), "edit-input", "如 CI-TP001-01")
+        )
+    );
+    body.appendChild(
+        editField("前置条件", editTextarea("preconditions", (c.preconditions || []).join("\n"), "edit-input", "每行一条", 2))
+    );
+    body.appendChild(
+        editField("操作步骤", editTextarea("steps", (c.steps || []).join("\n"), "edit-input", "每行一步", 2))
+    );
+    body.appendChild(editField("测试数据", editTextarea("test_data", c.test_data || "", "edit-input", "多行文本", 2)));
+    body.appendChild(
+        editField(
+            "预期结果",
+            editTextarea("expected_results", (c.expected_results || []).join("\n"), "edit-input", "每行一条", 2)
+        )
+    );
+    body.appendChild(
+        editField("覆盖说明", editInput("rationale", c.rationale || "", "edit-input", "这条用例覆盖什么"))
+    );
+
+    const actions = document.createElement("div");
+    actions.className = "case-edit-actions";
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "btn small danger";
+    deleteBtn.textContent = deleteTip;
+    deleteBtn.addEventListener("click", () => removeCase(index));
+    actions.appendChild(deleteBtn);
+    body.appendChild(actions);
+
+    card.appendChild(body);
+    setCardCollapsed(card, true);
+    return card;
+}
+
+function collectEditorCases() {
+    const cases = [];
+    el.caseEditorList.querySelectorAll(".case-edit-card").forEach((card) => {
+        const index = parseInt(card.dataset.index, 10);
+        const source = editor.cases[index];
+        const read = (field) => card.querySelector(`[data-sub="${field}"]`);
+        cases.push({
+            id: read("id").value.trim(),
+            title: read("title").value.trim(),
+            preconditions: splitLines(read("preconditions").value),
+            steps: splitLines(read("steps").value),
+            test_data: read("test_data").value.trim(),
+            expected_results: splitLines(read("expected_results").value),
+            priority: read("priority").value,
+            automation: read("automation").value,
+            requirement_refs: splitCommas(read("requirement_refs").value),
+            test_point_refs: splitCommas(read("test_point_refs").value),
+            covered_items: splitCommas(read("covered_items").value),
+            rationale: read("rationale").value.trim(),
+            isNew: source ? source.isNew : false,
+        });
+    });
+    return cases;
+}
+
+function splitLines(value) {
+    return value.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+}
+
+function splitCommas(value) {
+    return value.split(/[,，]/).map((part) => part.trim()).filter((part) => part !== "");
+}
+
+async function saveEdit() {
+    const cases = collectEditorCases();
+
+    const emptyId = cases.find((c) => !c.id);
+    if (emptyId) return showMessage("存在未填写编号的用例", "error");
+    const emptyTitle = cases.find((c) => !c.title);
+    if (emptyTitle) return showMessage("存在未填写标题的用例", "error");
+
+    const ids = cases.map((c) => c.id);
+    const duplicated = ids.find((id, i) => ids.indexOf(id) !== i);
+    if (duplicated) return showMessage(`用例编号重复：${duplicated}`, "error");
+
+    el.saveBtn.disabled = true;
+    try {
+        const response = await apiFetch(`/api/test-sets/${state.setId}/content`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                content: { test_cases: cases.map(({ isNew, ...rest }) => rest) },
+                base_version: editor.baseVersion,
+                note: el.editNote.value.trim() || null,
+                deleted_case_ids: editor.deletedCaseIds,
+            }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.status === 409) {
+            if (confirm("用例集已被其他人修改（版本冲突）。是否放弃本次编辑并加载最新版本？")) {
+                exitEditMode({ force: true });  // 已在上一句确认放弃
+                await loadDetail();
+                await loadVersions();
+            }
+            return;
+        }
+        if (!response.ok) {
+            return showMessage(data.error || "保存失败", "error");
+        }
+        showMessage(`已保存为新版本 v${data.version.version}`, "success");
+        exitEditMode({ force: true });  // 已保存：不再提示未保存修改
+        await loadDetail();
+        await loadVersions();
+    } catch (error) {
+        if (error.message !== "未登录") {
+            console.error("保存失败:", error);
+            showMessage("保存失败，请稍后重试", "error");
+        }
+    } finally {
+        el.saveBtn.disabled = false;
+    }
+}
+
+// ---------- 版本历史与对比 ----------
+
+function renderVersions() {
+    const list = el.versionList;
+    list.innerHTML = "";
+    state.versions.forEach((version) => {
+        const li = document.createElement("li");
+        li.className = "version-row";
+
+        const label = document.createElement("span");
+        label.className = "version-num";
+        label.textContent = `v${version.version}`;
+        li.appendChild(label);
+
+        const type = document.createElement("span");
+        type.className = `badge badge-source badge-${version.source_type}`;
+        type.textContent = SOURCE_TYPE_LABELS[version.source_type] || version.source_type;
+        li.appendChild(type);
+
+        const note = document.createElement("span");
+        note.className = "version-note";
+        note.textContent = version.note || "";
+        li.appendChild(note);
+
+        const time = document.createElement("span");
+        time.className = "version-time";
+        time.textContent = formatTime(version.created_at);
+        li.appendChild(time);
+
+        const actions = document.createElement("span");
+        actions.className = "version-actions";
+        const viewBtn = document.createElement("button");
+        viewBtn.className = "btn small";
+        viewBtn.textContent = "查看";
+        viewBtn.addEventListener("click", () => viewVersion(version.version));
+        actions.appendChild(viewBtn);
+
+        if (state.canEdit && version.version !== state.asset.current_version) {
+            const rollbackBtn = document.createElement("button");
+            rollbackBtn.className = "btn small";
+            rollbackBtn.textContent = "回滚到此版本";
+            rollbackBtn.addEventListener("click", () => rollbackTo(version.version));
+            actions.appendChild(rollbackBtn);
+        }
+        li.appendChild(actions);
+        list.appendChild(li);
+    });
+    if (state.versions.length === 0) {
+        const li = document.createElement("li");
+        li.className = "version-row";
+        li.textContent = "暂无版本记录";
+        list.appendChild(li);
+    }
+}
+
+async function rollbackTo(sourceVersion) {
+    if (!confirm(`确定回滚到 v${sourceVersion} 吗？将以其内容另存为新版本，历史版本保留。`)) return;
+    const response = await apiFetch(`/api/test-sets/${state.setId}/rollback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_version: sourceVersion }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return showMessage(data.error || "回滚失败", "error");
+    showMessage(`已回滚，生成新版本 v${data.version.version}`, "success");
+    el.diffPanel.hidden = true;
+    await loadDetail();
+    await loadVersions();
+}
+
+function fillDiffSelects() {
+    const numbers = state.versions.map((v) => v.version);
+    fillSelect(el.diffFrom, numbers);
+    fillSelect(el.diffTo, numbers);
+    if (numbers.length > 1) {
+        el.diffFrom.value = String(numbers[1]);
+        el.diffTo.value = String(numbers[0]);
+    }
+}
+
+function fillSelect(select, numbers) {
+    select.innerHTML = "";
+    numbers.forEach((num) => {
+        const option = document.createElement("option");
+        option.value = num;
+        option.textContent = `v${num}`;
+        select.appendChild(option);
+    });
+}
+
+async function renderDiff() {
+    const from = el.diffFrom.value;
+    const to = el.diffTo.value;
+    if (!from || !to) return;
+    const response = await apiFetch(`/api/test-sets/${state.setId}/diff?from_version=${from}&to_version=${to}`);
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        return showMessage(data.error || "对比失败", "error");
+    }
+    const diff = await response.json();
+    el.diffPanel.hidden = false;
+    el.diffLabel.textContent = `v${diff.from_version} → v${diff.to_version}`;
+    renderDiffInto(el.diffView, diff);
+    el.diffPanel.scrollIntoView({ behavior: "smooth" });
+}
+
+// 版本对比与 AI 修改预览共用同一渲染（含字符级高亮切片）
+function renderDiffInto(container, diff) {
+    container.innerHTML = "";
+
+    container.appendChild(buildDiffGroup("新增用例", diff.added, "diff-added"));
+    container.appendChild(buildDiffGroup("删除用例", diff.removed, "diff-removed"));
+
+    const changedWrap = document.createElement("div");
+    changedWrap.className = "diff-group";
+    const changedTitle = document.createElement("h3");
+    changedTitle.textContent = `修改用例（${diff.changed.length}）`;
+    changedWrap.appendChild(changedTitle);
+    diff.changed.forEach((change) => {
+        const card = document.createElement("div");
+        card.className = "diff-changed-card";
+        const head = document.createElement("p");
+        head.textContent = `${change.case_id} ${change.title}`;
+        card.appendChild(head);
+        const table = document.createElement("table");
+        table.className = "diff-table";
+        const thead = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        ["字段", "变更前", "变更后"].forEach((text) => {
+            const th = document.createElement("th");
+            th.textContent = text;
+            headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        Object.entries(change.fields).forEach(([field, pair]) => {
+            const tr = document.createElement("tr");
+            const labelTd = document.createElement("td");
+            labelTd.textContent = FIELD_LABELS[field] || field;
+            tr.appendChild(labelTd);
+            tr.appendChild(buildDiffValueCell(pair.before_segments, pair.before, "diff-before"));
+            tr.appendChild(buildDiffValueCell(pair.after_segments, pair.after, "diff-after"));
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        card.appendChild(table);
+        changedWrap.appendChild(card);
+    });
+    if (diff.changed.length === 0) {
+        const none = document.createElement("p");
+        none.className = "diff-empty";
+        none.textContent = "无修改用例";
+        changedWrap.appendChild(none);
+    }
+    container.appendChild(changedWrap);
+}
+
+function buildDiffGroup(title, cases, className) {
+    const group = document.createElement("div");
+    group.className = `diff-group ${className}`;
+    const heading = document.createElement("h3");
+    heading.textContent = `${title}（${cases.length}）`;
+    group.appendChild(heading);
+    cases.forEach((c) => {
+        const item = document.createElement("p");
+        item.className = "diff-case";
+        item.textContent = `${c.id} ${c.title}`;
+        group.appendChild(item);
+    });
+    if (cases.length === 0) {
+        const none = document.createElement("p");
+        none.className = "diff-empty";
+        none.textContent = "无";
+        group.appendChild(none);
+    }
+    return group;
+}
+
+function formatValue(value) {
+    if (Array.isArray(value)) return value.join("\n");
+    return value === null || value === undefined ? "" : String(value);
+}
+
+// 按 service 返回的差异切片渲染单元格：changed 片段加深标记，一眼看出改了哪几个字
+function buildDiffValueCell(segments, fallbackText, className) {
+    const td = document.createElement("td");
+    td.className = className;
+    if (Array.isArray(segments) && segments.length > 0) {
+        segments.forEach((seg) => {
+            const span = document.createElement("span");
+            if (seg.changed) span.className = "diff-mark";
+            span.textContent = seg.text;
+            td.appendChild(span);
+        });
+    } else {
+        td.textContent = formatValue(fallbackText);
+    }
+    return td;
+}

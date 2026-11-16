@@ -1,0 +1,849 @@
+/* 测试工作台：列表页 + 详情页（自包含样式，主色对齐 nav.css 的 --primary-color） */
+
+:root {
+    --tb-primary: #4361ee;
+    --tb-primary-light: #eef2ff;
+    --tb-border: #d7dde8;
+    --tb-text: #2c3345;
+    --tb-muted: #6b7280;
+}
+
+/* hidden 属性兜底：.btn 等显式 display 会覆盖 UA 的 [hidden] 规则 */
+[hidden] {
+    display: none !important;
+}
+
+body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    color: var(--tb-text);
+    background-color: #f5f7fb;
+    line-height: 1.6;
+    overflow-x: hidden;
+}
+
+.app-container {
+    min-height: 100vh;
+}
+
+.main-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    /* 不设底部内边距：版权信息与底部的间距由 nav.css 的 .footer-note 全局样式（12px）决定，与其他页面一致 */
+    padding: 28px 36px 0;
+    overflow-y: auto;
+    /* 宽度交给 flex 分配：侧栏收缩到 68px 时自动占满（nav.css 的 .sidebar.collapsed）。
+       不要再写死 calc(100vw - 260px)——那是展开态宽度，收缩后右侧会空出 192px */
+    min-width: 0;
+}
+
+/* ---------- 头部 ---------- */
+
+.tb-header { margin-bottom: 20px; }
+
+.tb-header-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.tb-title { font-size: 22px; margin: 0; }
+
+.tb-subtitle {
+    color: var(--tb-muted);
+    font-size: 13px;
+    margin: 6px 0 0;
+}
+
+.readonly-hint {
+    font-size: 13px;
+    color: var(--tb-muted);
+    background: #f8fafc;
+    border: 1px dashed var(--tb-border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin: 0 0 16px;
+}
+
+.detail-actions {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.owner-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.detail-actions .back-btn,
+.spec-detail-actions .back-btn { margin-left: auto; }
+
+/* 两处详情页的返回按钮：操作行内靠右 + 尺寸对齐同行 .btn（8px 14px / 13px）；
+   配色与 hover 由 nav.css「通用操作按钮」统一提供 */
+.detail-actions .back-btn,
+.spec-detail-actions .back-btn {
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 400;
+}
+
+.spec-detail-actions { display: flex; align-items: center; gap: 10px; margin: 20px 0 16px; }
+
+.spec-desc { margin-bottom: 4px; }
+
+/* ---------- 徽标 ---------- */
+
+.badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.badge-private { background: #f1f5f9; color: #475569; }
+.badge-source { background: var(--tb-primary-light); color: var(--tb-primary); }
+.badge-shared { background: var(--tb-primary-light); color: var(--tb-primary); }
+.badge-version { background: #fff7ed; color: #c2410c; }
+
+.badge-publish { background: var(--tb-primary-light); color: var(--tb-primary); }
+.badge-manual_edit { background: #f1f5f9; color: #475569; }
+.badge-rollback { background: #fff7ed; color: #c2410c; }
+.badge-ai_edit { background: #ecfdf5; color: #047857; }
+
+/* ---------- 按钮 ---------- */
+
+.btn {
+    border: 1px solid var(--tb-border);
+    background: #fff;
+    color: var(--tb-text);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+    transition: all 0.15s;
+}
+
+.btn:hover:not(:disabled) { border-color: var(--tb-primary); color: var(--tb-primary); }
+
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn.primary {
+    background: var(--tb-primary);
+    border-color: var(--tb-primary);
+    color: #fff;
+}
+
+.btn.primary:hover:not(:disabled) { opacity: 0.9; color: #fff; }
+
+.btn.danger { color: #dc2626; }
+.btn.danger:hover:not(:disabled) { border-color: #dc2626; color: #dc2626; }
+
+.btn.small { padding: 5px 10px; font-size: 12px; }
+
+.btn-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* ---------- 列表页 ---------- */
+
+.list-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+
+.list-container { flex: 1; }
+
+.no-match-hint {
+    grid-column: 1 / -1;
+    text-align: center;
+    color: var(--tb-muted);
+    padding: 40px 20px;
+    font-size: 14px;
+}
+
+/* 搜索框（.search-box）的共用样式见 nav.css「列表页搜索框」分节 */
+
+.list-area {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 24px;
+}
+
+/* 卡壳 / 可点主体 / 底部操作行（.list-card、.list-card-link、.list-card-actions）统一在
+   nav.css「列表卡片」公共分节（工作流 / 用例集 / 知识库 / 接口测试四个列表页共用），
+   这里只保留卡片自身的内容排版（.card-header / .card-title / .card-desc / .card-meta）。 */
+
+.card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+.card-title-group { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.card-title-group .card-title { overflow-wrap: anywhere; }
+
+.card-title { font-size: 16px; margin: 0; overflow-wrap: anywhere; }
+
+.card-desc { margin: 0; font-size: 13px; color: var(--tb-muted); overflow-wrap: anywhere; }
+
+.card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    font-size: 12px;
+    color: var(--tb-muted);
+}
+
+.empty-state, .error-state, .loading-state {
+    text-align: center;
+    color: var(--tb-muted);
+    padding: 60px 20px;
+    grid-column: 1 / -1;
+}
+
+.empty-state i { font-size: 42px; margin-bottom: 12px; color: #cbd5e1; }
+
+.empty-state .btn { margin-top: 14px; }
+
+/* ---------- 面板 ---------- */
+
+.panel {
+    background: #fff;
+    border: 1px solid var(--tb-border);
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 16px;
+}
+
+.panel-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.panel-title { font-size: 16px; margin: 0; }
+
+.version-badge {
+    font-size: 12px;
+    color: #c2410c;
+    background: #fff7ed;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-weight: normal;
+}
+
+/* ---------- 用例表 ---------- */
+
+.table-wrap { overflow-x: auto; }
+
+.cases-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+.cases-table th, .cases-table td {
+    border: 1px solid #e5e9f2;
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.cases-table th { background: #f8fafc; font-weight: 600; white-space: nowrap; }
+
+/* 用例表（11 列，列序与 workflow.css 的 .case-grid 保持一致；测试点追溯与覆盖项
+   已合并为第 10 列）：固定列宽比例 + 窄屏横向滚动，避免某个长文本列把整表撑开 */
+.cases-table.case-grid {
+    table-layout: fixed;
+    min-width: 1120px;
+}
+
+.cases-table.case-grid th {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.cases-table.case-grid th:nth-child(1), .cases-table.case-grid td:nth-child(1) { width: 104px; }
+.cases-table.case-grid th:nth-child(2), .cases-table.case-grid td:nth-child(2) { width: 168px; }
+.cases-table.case-grid th:nth-child(3), .cases-table.case-grid td:nth-child(3) { width: 132px; }
+.cases-table.case-grid th:nth-child(4), .cases-table.case-grid td:nth-child(4) { width: 208px; }
+.cases-table.case-grid th:nth-child(5), .cases-table.case-grid td:nth-child(5) { width: 168px; }
+.cases-table.case-grid th:nth-child(6), .cases-table.case-grid td:nth-child(6) { width: 192px; }
+.cases-table.case-grid th:nth-child(7), .cases-table.case-grid td:nth-child(7) { width: 64px; }
+.cases-table.case-grid th:nth-child(8), .cases-table.case-grid td:nth-child(8) { width: 78px; }
+.cases-table.case-grid th:nth-child(9), .cases-table.case-grid td:nth-child(9) { width: 108px; }
+/* 第 10 列：测试点 / 覆盖项（合并列，两行分别是测试点与覆盖项编号） */
+.cases-table.case-grid th:nth-child(10), .cases-table.case-grid td:nth-child(10) { width: 172px; }
+.cases-table.case-grid th:nth-child(11), .cases-table.case-grid td:nth-child(11) { width: 168px; }
+
+/* 仅编号/优先级/自动化这类短列不换行（多值列允许换行，长文本列由 .cell-clamp 折叠） */
+.cases-table.case-grid td:nth-child(1),
+.cases-table.case-grid td:nth-child(7),
+.cases-table.case-grid td:nth-child(8) {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ---------- 编辑模式 ---------- */
+
+.editor-note { margin-bottom: 8px; }
+
+.editor-note label, .form-group label {
+    display: block;
+    font-size: 12px;
+    color: var(--tb-muted);
+    margin-bottom: 4px;
+}
+
+.editor-note input {
+    width: 100%;
+    max-width: 480px;
+    border: 1px solid var(--tb-border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+}
+
+.editor-tip { font-size: 12px; color: var(--tb-muted); margin: 6px 0 12px; }
+
+.delete-tip { color: #c2410c; }
+
+/* 用例编辑卡片用 nav.css 的折叠卡片（.edit-card / .edit-summary / .edit-body / .edit-field），
+   与工作流详情的测试点/需求分析同一套；这里只补列表容器与"删除用例"按钮行的差异。
+   .case-edit-card 本身不带样式，只作 JS 钩子（renderEditor / syncEditorFromDom 用它定位卡片）。 */
+#caseEditorList {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.case-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+}
+
+.form-group input, .form-group textarea, .form-group select {
+    width: 100%;
+    border: 1px solid var(--tb-border);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    box-sizing: border-box;
+}
+
+.form-group input:disabled { background: #f1f5f9; color: var(--tb-muted); }
+
+/* ---------- AI 修改 ---------- */
+
+#aiInstruction {
+    width: 100%;
+    border: 1px solid var(--tb-border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    box-sizing: border-box;
+    resize: vertical;
+}
+
+.ai-generate-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.ai-generating-hint { font-size: 12px; color: var(--tb-primary); }
+
+.warn-banner {
+    background: #fff7ed;
+    border: 1px solid #fdba74;
+    color: #c2410c;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    margin-bottom: 12px;
+}
+
+/* ---------- 版本历史 ---------- */
+
+.version-list { list-style: none; margin: 0 0 14px; padding: 0; }
+
+.version-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 4px;
+    border-bottom: 1px solid #eef1f7;
+    flex-wrap: wrap;
+}
+
+.version-num { font-weight: 600; min-width: 36px; }
+
+.version-note { font-size: 13px; color: var(--tb-text); flex: 1; overflow-wrap: anywhere; }
+
+.version-time { font-size: 12px; color: var(--tb-muted); }
+
+.version-actions { display: flex; gap: 6px; }
+
+.diff-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--tb-muted);
+}
+
+.diff-controls select {
+    border: 1px solid var(--tb-border);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 13px;
+}
+
+/* ---------- 版本对比 ---------- */
+
+.diff-group { margin-bottom: 16px; }
+
+.diff-group h3 { font-size: 14px; margin: 0 0 8px; }
+
+.diff-added { color: #047857; }
+.diff-removed { color: #dc2626; }
+
+.diff-case {
+    margin: 4px 0;
+    font-size: 13px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: #f8fafc;
+    overflow-wrap: anywhere;
+}
+
+.diff-added .diff-case { background: #ecfdf5; }
+.diff-removed .diff-case { background: #fef2f2; text-decoration: line-through; }
+
+.diff-changed-card { border: 1px solid #e5e9f2; border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+
+.diff-changed-card > p { margin: 0 0 8px; font-weight: 600; font-size: 13px; }
+
+.diff-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+
+.diff-table th, .diff-table td {
+    border: 1px solid #e5e9f2;
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.diff-table th { background: #f8fafc; }
+
+.diff-before { color: #b91c1c; background: #fef2f2; }
+.diff-after { color: #047857; background: #ecfdf5; }
+
+/* 单元格内实际发生变化的字符片段（深一档的红/绿，与整行底色区分） */
+.diff-before .diff-mark {
+    background: #f5b7b7;
+    color: #7f1d1d;
+    border-radius: 3px;
+    padding: 0 2px;
+    font-weight: 600;
+}
+
+.diff-after .diff-mark {
+    background: #95e2c3;
+    color: #065f46;
+    border-radius: 3px;
+    padding: 0 2px;
+    font-weight: 600;
+}
+
+.diff-empty { color: var(--tb-muted); font-size: 13px; margin: 4px 0; }
+
+/* ---------- 消息提示 ---------- */
+
+.message-alert {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 12px 18px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    background: #fff;
+    border-left: 4px solid var(--tb-primary);
+    max-width: 420px;
+}
+
+.message-success { border-left-color: #059669; }
+.message-error { border-left-color: #dc2626; }
+
+.message-close {
+    border: none;
+    background: none;
+    font-size: 16px;
+    cursor: pointer;
+    color: var(--tb-muted);
+    padding: 0;
+}
+
+/* 只负责贴底；间距、字号、颜色均由 nav.css 的 .footer-note 全局样式决定，保证与其他页面一致 */
+.footer-note {
+    margin-top: auto;
+}
+
+/* ---------- 移动端 ---------- */
+
+@media (max-width: 768px) {
+    .main-content {
+        padding: 20px 16px 0;
+        max-width: 100vw;
+    }
+
+    /* 避让固定的汉堡菜单按钮 */
+    .tb-header {
+        padding-top: 52px;
+    }
+
+    /* 窄屏下用例表保持可读宽度，由 .table-wrap 横向滚动
+       （.cases-table.case-grid 的 min-width 已给出 1120px，此处无需重复设置） */
+    .cases-table:not(.case-grid) {
+        min-width: 760px;
+    }
+
+    .detail-actions {
+        gap: 8px;
+    }
+
+    .diff-controls {
+        flex-wrap: wrap;
+    }
+}
+
+
+/* ---------- API 工作台（PR4） ---------- */
+
+.tb-header-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.method-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: monospace;
+}
+
+.method-get { background: #e0f2fe; color: #0369a1; }
+.method-post { background: #dcfce7; color: #15803d; }
+.method-put { background: #fef3c7; color: #b45309; }
+.method-patch { background: #fef3c7; color: #b45309; }
+.method-delete { background: #fee2e2; color: #b91c1c; }
+
+.case-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 6px;
+    border-bottom: 1px solid #eef1f7;
+    flex-wrap: wrap;
+    font-size: 13px;
+}
+
+.case-name { flex: 1; min-width: 140px; overflow-wrap: anywhere; }
+.case-expected { color: var(--tb-muted); font-size: 12px; }
+.case-enabled { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--tb-muted); }
+
+.run-controls { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.run-controls input {
+    flex: 1;
+    min-width: 220px;
+    border: 1px solid var(--tb-border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+}
+
+.run-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 6px;
+    border-bottom: 1px solid #eef1f7;
+    font-size: 13px;
+    flex-wrap: wrap;
+}
+
+.run-status { color: var(--tb-muted); font-size: 12px; }
+.run-duration { color: var(--tb-muted); font-size: 12px; margin-left: auto; }
+
+.verdict-passed { background: #dcfce7; color: #15803d; }
+.verdict-failed { background: #fee2e2; color: #b91c1c; }
+.verdict-error { background: #fef3c7; color: #b45309; }
+
+.run-summary { margin-top: 12px; }
+.run-summary-ok { color: #15803d; font-size: 13px; font-weight: 600; }
+.run-summary-error { color: #b91c1c; font-size: 13px; font-weight: 600; }
+
+/* ---------- 模态框（导入 OpenAPI） ---------- */
+
+.modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    z-index: 1500;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal.active { display: flex; }
+
+.modal-content {
+    background: #fff;
+    border-radius: 12px;
+    padding: 22px;
+    width: min(560px, 92vw);
+    max-height: 88vh;
+    overflow-y: auto;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+
+.modal-title { font-size: 16px; margin: 0; }
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.btn-secondary {
+    border: 1px solid var(--tb-border);
+    background: #fff;
+    color: var(--tb-text);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.btn-primary {
+    border: 1px solid var(--tb-primary);
+    background: var(--tb-primary);
+    color: #fff;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+/* ---------- 规则说明 / 维度徽章 / AI 面板 / 执行详情展开（UX 优化） ---------- */
+
+.rules-panel {
+    background: #f8fafc;
+    border: 1px solid var(--tb-border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+}
+
+.rules-title { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+
+.rules-list { margin: 0 0 8px; padding-left: 18px; font-size: 12px; color: var(--tb-text); }
+.rules-list li { margin-bottom: 4px; }
+
+.rules-note { margin: 0; font-size: 12px; color: var(--tb-muted); }
+
+.badge-dimension { background: #ede9fe; color: #6d28d9; }
+
+.ai-panel {
+    border: 1px solid var(--tb-primary-light);
+    background: #fafbff;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+}
+
+.ai-generate-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+
+.ai-generating-hint { font-size: 12px; color: var(--tb-primary); }
+
+.run-detail {
+    padding: 8px 10px;
+    border-bottom: 1px solid #eef1f7;
+    background: #f8fafc;
+    border-radius: 6px;
+    margin-bottom: 4px;
+}
+
+.run-detail-label { margin: 4px 0 2px; font-size: 12px; color: var(--tb-muted); }
+
+.run-body {
+    margin: 0;
+    font-size: 12px;
+    font-family: monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 240px;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid var(--tb-border);
+    border-radius: 6px;
+    padding: 8px;
+}
+
+/* 响应头列表通常较短，压缩高度；历史行内的响应信息块独占整行 */
+.run-headers { max-height: 140px; }
+.run-response-block { flex-basis: 100%; min-width: 0; }
+
+.run-reason { margin: 2px 0; font-size: 12px; overflow-wrap: anywhere; }
+.run-reason-failed { color: #b91c1c; }
+.run-reason-error { color: #b45309; }
+
+.run-history-counts { font-size: 12px; color: var(--tb-muted); }
+.run-history-runner { font-size: 12px; color: var(--tb-muted); }
+.run-history-error { font-size: 12px; color: #b91c1c; overflow-wrap: anywhere; }
+
+.run-auth-ok { color: #15803d; border-bottom: none; margin-bottom: 4px; }
+.run-auth-fail { color: #b91c1c; border-bottom: none; margin-bottom: 4px; }
+
+/* ---------- 响应断言 / 批量执行（D-027） ---------- */
+
+.run-scope-hint { align-self: center; font-size: 12px; color: var(--tb-muted); }
+
+.endpoint-case-count { font-size: 12px; color: var(--tb-muted); }
+
+/* ---------- 已选接口卡片：分组可编辑用例区（批量执行 UX） ---------- */
+
+.case-group-list { display: flex; flex-direction: column; }
+
+.batch-actions { margin: 0 0 10px; }
+
+.case-group {
+    border: 1px solid var(--tb-border);
+    border-radius: 8px;
+    margin-bottom: 10px;
+    background: #fff;
+}
+
+.case-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: #f8fafc;
+    border-bottom: 1px solid var(--tb-border);
+    flex-wrap: wrap;
+}
+
+.case-group-toggle { border: none; background: none; cursor: pointer; color: var(--tb-muted); padding: 2px 4px; }
+
+.case-group-path { font-family: monospace; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.case-group-spacer { flex: 1; }
+.case-group-count { font-size: 12px; color: var(--tb-muted); }
+
+/* 用例卡列表：卡片（.edit-card）自身不带外边距，靠容器 gap 分隔 */
+.case-list,
+.case-group-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.case-group-body { padding: 8px 10px; }
+.case-group-body .ai-panel { margin-bottom: 10px; }
+
+.run-endpoint {
+    font-size: 12px;
+    font-family: monospace;
+    color: var(--tb-muted);
+    background: #f1f5f9;
+    border-radius: 4px;
+    padding: 1px 6px;
+}
+
+.run-assertion { margin: 2px 0; font-size: 12px; overflow-wrap: anywhere; }
+.run-assertion-ok { color: #15803d; }
+.run-assertion-fail { color: #b91c1c; }
+
+.run-failure-group {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: #b91c1c;
+    overflow-wrap: anywhere;
+}
+
+.badge-assertions { background: #ecfdf5; color: #0f766e; }
+
+/* ---------- 登录态配置（D-025） ---------- */
+
+.auth-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.auth-summary { font-size: 12px; color: var(--tb-muted); }
+
+.auth-panel {
+    border: 1px solid var(--tb-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    background: #f8fafc;
+}
+
+.auth-grid { display: grid; grid-template-columns: 110px 1fr 140px 1fr; gap: 8px; margin-bottom: 8px; }
+.auth-grid select,
+.auth-grid input {
+    border: 1px solid var(--tb-border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 13px;
+    min-width: 0;
+}
+
+.auth-body-label { display: block; font-size: 12px; color: var(--tb-muted); margin-bottom: 4px; }
+.auth-panel textarea {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--tb-border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+    font-family: Consolas, Monaco, monospace;
+    resize: vertical;
+}
+
+@media (max-width: 768px) {
+    .auth-grid { grid-template-columns: 1fr 1fr; }
+}
+
+.run-target {
+    font-size: 12px;
+    color: var(--tb-muted);
+    padding: 4px 6px;
+    border-bottom: 1px dashed var(--tb-border);
+    margin-bottom: 4px;
+}
+
+/* ---------- 用例编辑器（折叠卡片，D-024 / D-041） ---------- */
+
+/* 接口测试的用例卡也用 nav.css 的折叠卡片（.edit-card / .edit-summary / .edit-body，
+   字段是 .edit-field / .edit-stack + .edit-grid），这里只留"应用修改"那一行与提示文案。 */
+.case-editor-actions { align-items: center; }
+.case-editor-hint { font-size: 12px; color: var(--tb-muted); }

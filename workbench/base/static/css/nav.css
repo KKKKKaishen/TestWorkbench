@@ -1,0 +1,1063 @@
+/* 公共样式：所有页面共用（配合 templates/partials/sidebar.html 使用）：
+   Shell 基础（全局 reset 与设计变量）、侧栏导航，以及全站共用组件（消息提示、通用操作按钮、
+   列表页搜索框、用例表长文本单元格）。页面专属样式仍在各自的 CSS 中。 */
+
+/* Shell 基础：全局 reset 与设计变量（各业务页共用，页面专属字体栈/变量仍在各自 CSS 中） */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --primary-color: #4361ee;
+    --primary-light: #eef2ff;
+    --secondary-color: #3a0ca3;
+    --sidebar-bg: #f8f9fa;
+    --card-bg: #ffffff;
+    --text-primary: #212529;
+    --text-secondary: #6c757d;
+    --text-tertiary: #8f959e;
+    --bg-light: #f7f8fa;
+    --bg-white: #f5f7fb;
+    --border-color: #e9ecef;
+    --hover-color: #f1f3f9;
+    --danger-color: #e63946;
+    --success-color: #2a9d8f;
+    --shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    --shadow-light: 0 2px 8px rgba(0, 0, 0, 0.05);
+    --transition: all 0.3s ease;
+    --border-radius: 12px;
+    --border-radius-sm: 8px;
+}
+
+/* 页面主容器外壳 */
+.app-container {
+    display: flex;
+}
+
+.mobile-menu-btn {
+    display: none;
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    z-index: 1001;
+    background: var(--primary-color, #4361ee);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 44px;
+    height: 44px;
+    font-size: 1.1rem;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    transition: all 0.3s ease;
+}
+
+.mobile-menu-btn:hover {
+    filter: brightness(0.92);
+}
+
+.sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    height: 100vh;
+    position: sticky;
+    top: 0;
+    background-color: var(--sidebar-bg, #f8f9fa);
+    border-right: 1px solid var(--border-color, #e9ecef);
+    display: flex;
+    flex-direction: column;
+    z-index: 1000;
+    box-shadow: 2px 0 10px rgba(0, 0, 0, 0.03);
+}
+
+/* 收缩/展开切换按钮：悬浮在侧栏右边缘 */
+.sidebar-toggle {
+    position: absolute;
+    top: 22px;
+    right: -12px;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: #ffffff;
+    border: 1px solid var(--border-color, #e9ecef);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+    color: var(--text-secondary, #6c757d);
+    cursor: pointer;
+    z-index: 1100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    padding: 0;
+    transition: all 0.2s ease;
+}
+
+.sidebar-toggle:hover {
+    color: var(--primary-color, #4361ee);
+    border-color: var(--primary-color, #4361ee);
+}
+
+.app-logo-mini {
+    display: none;
+    font-size: 1.6rem;
+    color: var(--primary-color, #4361ee);
+    line-height: 1;
+}
+
+.sidebar-header {
+    padding: 18px 16px 12px;
+}
+
+.app-logo-link {
+    display: block;
+    line-height: 0;
+}
+
+.app-logo {
+    max-width: 100%;
+    height: auto;
+}
+
+/* 全局导航 */
+.nav-menu {
+    display: flex;
+    flex-direction: column;
+    padding: 4px 12px;
+}
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    padding: 12px 14px;
+    margin: 2px 0;
+    border-radius: 8px;
+    color: var(--text-secondary, #6c757d);
+    text-decoration: none;
+    font-size: 0.95rem;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.nav-item i {
+    width: 20px;
+    margin-right: 12px;
+    font-size: 1rem;
+    color: var(--primary-color, #4361ee);
+    text-align: center;
+}
+
+.nav-item:hover:not(.active) {
+    background-color: var(--hover-color, #f1f3f9);
+    color: var(--text-primary, #212529);
+}
+
+.nav-item.active {
+    background-color: var(--primary-light, #eef2ff);
+    color: var(--primary-color, #4361ee);
+    font-weight: 600;
+}
+
+.nav-item-secondary {
+    font-size: 0.88rem;
+    color: var(--text-tertiary, #8f959e);
+}
+
+/* 中部弹性占位（聊天页由会话历史填充） */
+.nav-spacer {
+    flex: 1;
+}
+
+.sidebar-chat-actions {
+    padding: 8px 16px 4px;
+}
+
+.conversation-history {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+/* 底部用户区 */
+.sidebar-footer {
+    padding: 12px 16px 14px;
+}
+
+.userInfo {
+    position: relative;
+    display: flex;
+    align-items: center;
+    padding: 10px 12px;
+    cursor: pointer;
+    border-radius: 8px;
+    background: #ffffff;
+    width: 100%;
+    font-size: 1rem;
+    transition: background-color 0.2s;
+}
+
+.userInfo:hover {
+    background-color: var(--hover-color, #f1f3f9);
+}
+
+.userInfo > .more-btn {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 16px;
+    background: none;
+    border: none;
+    color: var(--text-tertiary, #8f959e);
+    cursor: pointer;
+}
+
+.userInfo .user-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    overflow: hidden;
+    margin-right: 10px;
+    flex-shrink: 0;
+}
+
+.userInfo .avatar-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.userInfo .username {
+    font-weight: 600;
+    color: var(--text-primary, #212529);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dropdown-content {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    margin-bottom: 6px;
+    background-color: #ffffff;
+    min-width: 150px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    z-index: 1100;
+    overflow: hidden;
+}
+
+.dropdown-content.show {
+    display: block;
+}
+
+.dropdown-content .dropdown-item {
+    padding: 12px 18px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    font-size: 0.92rem;
+    color: var(--text-primary, #212529);
+}
+
+.dropdown-content .dropdown-item:hover {
+    background-color: #f0f0f0;
+}
+
+/* 主内容区页脚版权（所有页面共用，无底色无边框） */
+.footer-note {
+    text-align: center;
+    padding: 12px;
+    font-size: 11px;
+    color: var(--text-tertiary, #8f959e);
+}
+
+/* 收缩态：只保留图标 */
+.sidebar.collapsed {
+    width: 68px;
+}
+
+.sidebar.collapsed .app-logo {
+    display: none;
+}
+
+.sidebar.collapsed .app-logo-mini {
+    display: block;
+}
+
+.sidebar.collapsed .sidebar-header {
+    display: flex;
+    justify-content: center;
+}
+
+.sidebar.collapsed .nav-menu {
+    padding: 4px 8px;
+}
+
+.sidebar.collapsed .nav-item {
+    justify-content: center;
+    padding: 12px 0;
+}
+
+.sidebar.collapsed .nav-item i {
+    margin-right: 0;
+}
+
+.sidebar.collapsed .nav-item span {
+    display: none;
+}
+
+.sidebar.collapsed .sidebar-chat-actions {
+    padding: 8px 8px 4px;
+}
+
+.sidebar.collapsed .new-chat-btn {
+    font-size: 0;
+    padding: 12px 0;
+    box-shadow: none;
+}
+
+.sidebar.collapsed .new-chat-btn::before {
+    margin-right: 0;
+    font-size: 16px;
+}
+
+.sidebar.collapsed .conversation-history {
+    display: none;
+}
+
+.sidebar.collapsed .sidebar-footer {
+    margin-top: auto;
+    padding: 12px 8px 14px;
+}
+
+.sidebar.collapsed .userInfo {
+    justify-content: center;
+    padding: 8px 0;
+    background: transparent;
+}
+
+.sidebar.collapsed .userInfo .user-avatar {
+    margin-right: 0;
+}
+
+.sidebar.collapsed .userInfo .username,
+.sidebar.collapsed .userInfo > .more-btn {
+    display: none;
+}
+
+.sidebar.collapsed .dropdown-content {
+    right: auto;
+    left: 0;
+}
+
+/* 移动端：侧栏收起为抽屉 */
+@media (max-width: 768px) {
+    .mobile-menu-btn {
+        display: block;
+    }
+
+    /* 抽屉模式下不显示收缩按钮，由汉堡按钮接管 */
+    .sidebar-toggle {
+        display: none;
+    }
+
+    .sidebar {
+        position: fixed;
+        left: -260px;
+        top: 0;
+        height: 100vh;
+        overflow-y: auto;
+        transition: left 0.3s ease;
+    }
+
+    .sidebar.active {
+        left: 0;
+    }
+
+    /* 抽屉打开时恢复完整宽度，不受收缩态影响 */
+    .sidebar.collapsed {
+        width: 260px;
+    }
+
+    .sidebar.collapsed .app-logo {
+        display: block;
+    }
+
+    .sidebar.collapsed .app-logo-mini {
+        display: none;
+    }
+
+    .sidebar.collapsed .sidebar-header {
+        display: block;
+    }
+
+    .sidebar.collapsed .nav-menu {
+        padding: 4px 12px;
+    }
+
+    .sidebar.collapsed .nav-item {
+        justify-content: flex-start;
+        padding: 12px 14px;
+    }
+
+    .sidebar.collapsed .nav-item i {
+        margin-right: 12px;
+    }
+
+    .sidebar.collapsed .nav-item span {
+        display: inline;
+    }
+
+    .sidebar.collapsed .sidebar-chat-actions {
+        padding: 8px 16px 4px;
+    }
+
+    .sidebar.collapsed .new-chat-btn {
+        font-size: 1rem;
+        padding: 14px 0;
+    }
+
+    .sidebar.collapsed .new-chat-btn::before {
+        margin-right: 8px;
+        font-size: 18px;
+    }
+
+    .sidebar.collapsed .conversation-history {
+        display: block;
+    }
+
+    .sidebar.collapsed .sidebar-footer {
+        padding: 12px 16px 14px;
+    }
+
+    .sidebar.collapsed .userInfo {
+        justify-content: flex-start;
+        padding: 10px 12px;
+        background: #ffffff;
+    }
+
+    .sidebar.collapsed .userInfo .user-avatar {
+        margin-right: 10px;
+    }
+
+    .sidebar.collapsed .userInfo .username,
+    .sidebar.collapsed .userInfo > .more-btn {
+        display: revert;
+    }
+
+    /* 列表页（知识库 / 测试任务 / 测试用例集 / 接口测试）：主操作按钮与搜索框各占一行，
+       搜索框占满整行——固定 300px 宽在窄屏会和按钮挤在一起，甚至撑出横向滚动。
+       选择器带 .list-header 提高特异性，才能压过本文件后面那条 300px 的公共 .search-box。 */
+    .list-header .search-box {
+        width: 100%;
+    }
+}
+
+
+/* ---------- 顶部消息提示（static/js/common.js 的 showMessage 使用，全站共用） ---------- */
+.message-alert {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 15px 20px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 300px;
+    max-width: 400px;
+    animation: slideIn 0.3s ease;
+    font-weight: 500;
+}
+
+.message-alert-hide {
+    animation: slideOut 0.3s ease forwards;
+}
+
+@keyframes slideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+@keyframes slideOut {
+    from {
+        transform: translateX(0);
+        opacity: 1;
+    }
+    to {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+}
+
+.message-info {
+    background-color: #d1ecf1;
+    color: #0c5460;
+    border-left: 4px solid #17a2b8;
+}
+
+.message-success {
+    background-color: #d4edda;
+    color: #155724;
+    border-left: 4px solid #28a745;
+}
+
+.message-error {
+    background-color: #f8d7da;
+    color: #721c24;
+    border-left: 4px solid #dc3545;
+}
+
+.message-warning {
+    background-color: #fff3cd;
+    color: #856404;
+    border-left: 4px solid #ffc107;
+}
+
+.message-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    color: inherit;
+    cursor: pointer;
+    margin-left: 15px;
+    line-height: 1;
+}
+
+/* ---------- 用例表长文本单元格（common.js fillCaseCell 生成，工作流页/测试用例集页共用） ---------- */
+
+/* 默认折叠到 5 行：整表不再被某一列的长文本撑开或拉高 */
+.cell-clamp {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 5;
+    overflow: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.cell-clamp.expanded {
+    display: block;
+    overflow: visible;
+}
+
+.cell-toggle {
+    margin-top: 4px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #2f6fed;
+    background: #f2f6ff;
+    border: 1px solid #d6e2ff;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.cell-toggle:hover {
+    background: #e6efff;
+}
+
+/* ---------- 通用操作按钮（列表页主操作 / 详情页返回，全站共用） ----------
+   新建知识库、新建工作流任务、创建新用例集、导入 OpenAPI、返回列表 共用同一套视觉：
+   默认主题色实底 + 白色文字，hover 转紫色（--secondary-color）并轻微上浮。
+   页面 CSS 只补充尺寸与位置（如标题行内的小尺寸、操作行内靠右），不再各自定义配色。 */
+.create-btn,
+.import-btn,
+.back-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border: none;
+    border-radius: var(--border-radius-sm);
+    background-color: var(--primary-color);
+    color: #fff;
+    font-size: 1rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    transition: var(--transition);
+    box-shadow: 0 4px 10px rgba(67, 97, 238, 0.2);
+}
+
+.create-btn:hover,
+.import-btn:hover,
+.back-btn:hover {
+    background-color: var(--secondary-color);
+    color: #fff;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 14px rgba(67, 97, 238, 0.3);
+}
+
+.create-btn:active,
+.import-btn:active,
+.back-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 6px rgba(67, 97, 238, 0.25);
+}
+
+/* ---------- 列表卡片（测试工作流 / 测试用例集 / 知识库 / 接口测试四个列表页共用） ----------
+   结构固定：.list-card（卡片壳）> .list-card-link（整块可点进详情的主体）
+   + .list-card-actions（底部操作行，右对齐；只读卡片也常显，按钮置灰并挂只读提示）。
+   操作按钮不能放进 .list-card-link：<a> 里嵌交互元素非法，点按钮会连带跳转。
+   卡片内容的排版（标题 / 徽章 / 摘要 / 元信息）仍是各页自己的样式，不在这里定义。 */
+.list-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    height: 100%;
+    padding: 22px;
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    box-shadow: var(--shadow-light);
+    transition: var(--transition);
+}
+
+.list-card:hover {
+    transform: translateY(-5px);
+    box-shadow: var(--shadow);
+    border-color: var(--primary-light);
+}
+
+.list-card-link {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: 1;
+    min-width: 0;
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.list-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+/* 操作行里的按钮：四个列表页共用同一视觉（描边默认态、hover 转主题色、危险动作转红），
+   尺寸与本页其它按钮一致（--btn 那档：13px 字号、8px/16px 内边距），不再各自定义配色与大小。 */
+.list-card-actions .btn {
+    border: 1px solid #d7dde8;
+    background: #fff;
+    color: #2c3345;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.list-card-actions .btn:hover:not(:disabled) {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
+
+.list-card-actions .btn:disabled,
+.list-card-actions .btn.danger:disabled {
+    color: #b0b7c5;
+    border-color: #e6e9ef;
+    background: #fafbfc;
+    cursor: not-allowed;
+}
+
+.list-card-actions .btn.danger {
+    color: #d64545;
+}
+
+.list-card-actions .btn.danger:hover:not(:disabled) {
+    border-color: #d64545;
+    color: #d64545;
+}
+
+/* ---------- 轻量 tooltip（全站共用，替代浏览器默认的 title 提示） ----------
+   用法：元素上加 data-tip="说明文字"。气泡由 static/js/common.js 挂在 body 上并定位：
+   按目标中心水平居中、往视口内收敛（侧栏左边缘的项、详情页右边缘的操作按钮都不会被裁），
+   上方放不下时翻到元素下方并翻转箭头。所以样式只在这里定义一次，
+   页面 CSS 不要给 [data-tip] 加定位或 ::after/::before（会与 JS 的气泡重复）。 */
+.floating-tip {
+    position: fixed;
+    z-index: 1900;
+    max-width: 300px;
+    padding: 8px 11px;
+    border-radius: 8px;
+    background: rgba(31, 39, 64, 0.96);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.6;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.22);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(4px);
+    transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+    pointer-events: none;
+}
+
+.floating-tip.visible {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+/* 指向目标中心的小箭头：横向偏移由 JS 通过 --tip-arrow-x 给出 */
+.floating-tip::after {
+    content: "";
+    position: absolute;
+    bottom: -5px;
+    left: var(--tip-arrow-x, 50%);
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: rgba(31, 39, 64, 0.96);
+}
+
+/* 气泡翻到元素下方时，箭头朝上 */
+.floating-tip.below::after {
+    bottom: auto;
+    top: -5px;
+    border-top-color: transparent;
+    border-bottom-color: rgba(31, 39, 64, 0.96);
+}
+
+/* ---------- 折叠卡片编辑器（工作流详情 / 用例集详情 共用） ----------
+   一个区块或一条记录一张卡片：折叠态只显示一行纯文本摘要（.edit-summary），点 .edit-toggle
+   才出现字段（.edit-body）。字段统一是「左标签 + 右控件」（.edit-field），短控件并排用
+   .edit-inline，卡头（.edit-head）放编号/标题 + 展开 + 删除。多行文本域高度由 JS 按内容
+   撑开（common.js 的 autoGrowTextarea），所以这里去掉拖拽把手并隐藏内部滚动条。
+   折叠只切 CSS、输入框始终留在 DOM 里（common.js 的 setCardCollapsed），页面收集表单时
+   不需要区分折叠态；区块级折叠（工作流详情用）见 .edit-section。 */
+.edit-card,
+.edit-section {
+    background: #f8fafc;
+    border: 1px solid #e8edf6;
+    border-radius: 10px;
+    padding: 7px 10px;
+}
+
+.edit-section {
+    padding: 8px 10px;
+}
+
+.edit-body,
+.edit-section-body {
+    display: none;
+}
+
+.edit-card:not(.collapsed) .edit-summary,
+.edit-section:not(.collapsed) .edit-digest {
+    display: none;
+}
+
+.edit-card:not(.collapsed) .edit-body,
+.edit-section:not(.collapsed) .edit-section-body {
+    display: block;
+}
+
+.edit-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.edit-summary-id {
+    font-family: Consolas, Monaco, monospace;
+    font-size: 12px;
+    font-weight: 600;
+    color: #2f6fed;
+    flex-shrink: 0;
+}
+
+.edit-summary-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1f2740;
+    flex-shrink: 0;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 折叠摘要里的属性（测试点是「维度 · 优先级 · 风险」，用例是「优先级 · 自动化」） */
+.edit-summary-props {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: #5a6478;
+}
+
+.edit-summary-desc {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    color: #6b7386;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.edit-summary-level {
+    flex-shrink: 0;
+}
+
+/* 摘要行里的弹性占位：插在名称之后，把「属性 + 启用 + 展开 + 删除」顶到右边缘 */
+.edit-summary-spacer {
+    flex: 1;
+    min-width: 0;
+}
+
+.edit-toggle,
+.edit-section-toggle {
+    flex-shrink: 0;
+    font-family: inherit;
+    font-size: 12px;
+    color: #2f6fed;
+    background: #fff;
+    border: 1px solid #dbe4f5;
+    border-radius: 999px;
+    padding: 2px 9px;
+    cursor: pointer;
+}
+
+.edit-toggle:hover,
+.edit-section-toggle:hover {
+    background: #f2f6ff;
+    border-color: #b9d1fb;
+}
+
+/* 卡头里没有会伸展的元素时（风险卡是"编号 + 等级"），展开/收起按钮靠右对齐 */
+.edit-head > .edit-toggle,
+.edit-head > .edit-section-toggle {
+    margin-left: auto;
+}
+
+.edit-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+
+.edit-props {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    margin-bottom: 8px;
+}
+
+.edit-inline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* 左标签 + 右控件：长文本字段纵向只占一行标签的高度，标签左对齐 */
+.edit-field {
+    display: grid;
+    grid-template-columns: 68px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.edit-label {
+    font-size: 12px;
+    color: #6b7386;
+    white-space: nowrap;
+}
+
+.edit-input,
+.edit-select {
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 13px;
+    font-family: inherit;
+    color: #1f2740;
+    border: 1px solid #e3e9f3;
+    border-radius: 6px;
+    padding: 6px 8px;
+    background: #fff;
+}
+
+/* 长描述用多行文本域：单行输入框会把长文案截成一条，看不见也改不了。
+   高度由 JS 按内容撑开（autoGrowTextarea），所以不给拖拽把手、也不会出现内部滚动条 */
+textarea.edit-input {
+    resize: none;
+    overflow-y: hidden;
+    line-height: 1.6;
+    min-height: 52px;
+}
+
+.edit-input:focus,
+.edit-select:focus {
+    outline: none;
+    border-color: #2f6fed;
+    box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.12);
+}
+
+.edit-input:disabled {
+    background: #f1f5f9;
+    color: #6b7386;
+}
+
+.edit-id {
+    width: 92px;
+    flex-shrink: 0;
+    font-family: Consolas, Monaco, monospace;
+    font-weight: 600;
+    color: #2f6fed;
+}
+
+.edit-title {
+    flex: 1;
+    min-width: 180px;
+    font-weight: 600;
+}
+
+/* 并排字段（.edit-inline）里的输入框/下拉按内容宽度，不随容器拉满 */
+.edit-inline .edit-input,
+.edit-inline .edit-select {
+    width: auto;
+    min-width: 88px;
+    flex-shrink: 0;
+}
+
+/* 标签在上的字段块（.edit-stack）与两列网格（.edit-grid）：标签较长、或控件是大段 JSON
+   这类技术文本时用；配合 .edit-mono 走等宽字体 */
+.edit-stack .edit-label {
+    display: block;
+    margin-bottom: 4px;
+}
+
+.edit-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.edit-mono {
+    font-family: Consolas, Monaco, monospace;
+    font-size: 12px;
+}
+
+/* 区块卡的静态标题（条目卡的卡头放的是编号/标题输入框，不放标题） */
+.edit-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1f2740;
+}
+
+/* 区块摘要行是折叠态唯一可见的内容：逐项给「标签 + 条数」，条目区块给「共 N 条 · 首条」 */
+.edit-digest {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin-top: 2px;
+    font-size: 12.5px;
+    color: #6b7386;
+}
+
+.edit-digest-item {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.edit-hint {
+    font-size: 12px;
+    color: #98a1b3;
+    background: #f7f9fd;
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin-bottom: 4px;
+}
+
+/* 卡片列表容器：纵向排列并统一间距，卡片自身不带外边距 */
+.edit-reqs {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+/* 行内删除（卡片摘要行与卡头共用） */
+.row-remove {
+    border: none;
+    background: transparent;
+    color: #d64545;
+    cursor: pointer;
+    font-size: 14px;
+    flex-shrink: 0;
+    padding: 4px;
+    opacity: 0.45;
+    transition: opacity 0.15s ease;
+}
+
+.row-remove:hover {
+    opacity: 1;
+    color: #a82626;
+}
+
+/* ---------- 列表页搜索框（知识库 / 测试任务 / 测试用例集 / 接口测试 共用） ----------
+   图标绝对定位在输入框内左侧，边框与内边距由输入框自身承担，高度与同排的操作按钮一致。
+   各页只需保证 .search-box 是 .list-header 的直接子元素；窄屏整行占满见本文件上方的窄屏块。 */
+.search-box {
+    position: relative;
+    width: 300px;
+    flex-shrink: 0;
+}
+
+.search-box input {
+    width: 100%;
+    padding: 12px 16px 12px 45px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    background-color: #fff;
+    color: inherit;
+    font-size: 1rem;
+    transition: var(--transition);
+}
+
+.search-box input:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1);
+}
+
+.search-box i {
+    position: absolute;
+    left: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-secondary);
+}
+
+/* 窄屏：两列字段块（.edit-grid）改单列。媒体查询不提升优先级，同特异性由源码顺序决胜，
+   所以这条必须留在文件末尾，写到 .edit-grid 定义之前会整块失效。 */
+@media (max-width: 768px) {
+    .edit-grid {
+        grid-template-columns: 1fr;
+    }
+}

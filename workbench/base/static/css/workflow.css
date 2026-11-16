@@ -1,0 +1,952 @@
+/* 测试工作流页面样式（全局 reset 与设计变量见 nav.css） */
+
+/* 防止 display:flex 等规则覆盖 hidden 属性的默认隐藏 */
+[hidden] {
+    display: none !important;
+}
+
+body {
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f4f6fa;
+    color: #2c3345;
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+
+/* 侧栏外壳/导航样式见 nav.css；页面主体在公共侧栏右侧。
+   外壳不锁高度、不裁滚动：三个页面都走整页滚动（与知识库/测试用例集一致），
+   侧栏是 position: sticky（nav.css），页面滚动时它自己不动。 */
+.app-container {
+    min-height: 100vh;
+    /* 移动端动态视口：地址栏收放时不至于多出一段空白滚动（不支持 dvh 的浏览器沿用上一行） */
+    min-height: 100dvh;
+}
+
+.workflow-container {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 窄屏下的主体布局统一放在文件末尾的 @media 块（媒体查询不提升优先级，写在这里会被下面的规则覆盖） */
+
+.workflow-body {
+    flex: 1;
+    display: flex;
+    gap: 16px;
+    padding: 16px 24px;
+}
+
+/* 原左侧「新建表单 + 任务列表」栏已随 D-037 拆页移除（表单去 /workflow-new，列表去 /workflows），
+   这里原先的 .workflow-side 系列规则一并删除 */
+
+.panel {
+    background: #fff;
+    border: 1px solid #e3e7ef;
+    border-radius: 12px;
+    padding: 16px;
+}
+
+.panel + .panel {
+    margin-top: 16px;
+}
+
+.panel-title {
+    font-size: 15px;
+    margin-bottom: 12px;
+    color: #1f2740;
+}
+
+.panel-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.panel-title-row .panel-title {
+    margin-bottom: 0;
+}
+
+.wf-input,
+.wf-textarea {
+    width: 100%;
+    border: 1px solid #d7dde8;
+    border-radius: 8px;
+    padding: 8px 10px;
+    /* 表单已从 320px 侧栏搬到整页（D-037）：13px 在宽屏上偏小，提到 14px */
+    font-size: 14px;
+    margin-bottom: 10px;
+    font-family: inherit;
+    background: #fbfcfe;
+}
+
+.wf-textarea {
+    resize: vertical;
+}
+
+.wf-textarea.mono {
+    font-family: Consolas, Monaco, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.wf-input:focus,
+.wf-textarea:focus {
+    outline: none;
+    border-color: #2f6fed;
+    background: #fff;
+}
+
+/* ---------- 需求文档上传（新建面板） ---------- */
+
+.upload-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.upload-types {
+    font-size: 12px;
+    color: #8a93a6;
+}
+
+.requirement-file-bar {
+    margin-bottom: 10px;
+}
+
+.requirement-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 6px 10px;
+    border: 1px solid #d7dde8;
+    border-radius: 8px;
+    background: #f5f7fa;
+    font-size: 13px;
+    color: #2c3345;
+}
+
+.requirement-chip-name {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.requirement-chip-remove {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: #8a93a6;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.requirement-chip-remove:hover {
+    color: #e5484d;
+    background: rgba(229, 72, 77, 0.08);
+}
+
+/* 解析状态提示：info 进行中 / ok 成功 / warn 截断告警 / error 失败 */
+.upload-status {
+    font-size: 12px;
+    line-height: 1.5;
+    margin-bottom: 10px;
+}
+
+.upload-status-info { color: #5a6478; }
+.upload-status-ok { color: #1a9c5d; }
+.upload-status-warn { color: #c77700; }
+.upload-status-error { color: #d64545; }
+
+/* 需求原文面板标题上的来源文档标记 */
+.file-badge {
+    font-size: 12px;
+    font-weight: normal;
+    color: #5a6478;
+    background: #eef1f6;
+    border-radius: 6px;
+    padding: 2px 8px;
+    margin-left: 6px;
+}
+
+.btn {
+    border: 1px solid #d7dde8;
+    background: #fff;
+    color: #2c3345;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.btn:hover:not(:disabled) {
+    border-color: #2f6fed;
+    color: #2f6fed;
+}
+
+.btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.btn.primary {
+    background: #2f6fed;
+    border-color: #2f6fed;
+    color: #fff;
+}
+
+.btn.primary:hover:not(:disabled) {
+    background: #2359c9;
+    color: #fff;
+}
+
+.btn.full {
+    width: 100%;
+}
+
+.btn.small {
+    padding: 5px 10px;
+    font-size: 12px;
+}
+
+.btn-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.workflow-list {
+    list-style: none;
+}
+
+.workflow-list li {
+    padding: 9px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.workflow-list li:hover {
+    background: #eef2f8;
+}
+
+.workflow-list li.active {
+    background: #e8effd;
+    color: #2f6fed;
+    font-weight: 600;
+}
+
+.workflow-list li.empty {
+    color: #98a1b3;
+    cursor: default;
+}
+
+.wf-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---------- 详情卡片 ---------- */
+
+.workflow-main {
+    flex: 1;
+    /* 不再自己滚：卡片随内容长高，滚动交给整页（与用例集详情页一致） */
+    min-width: 0;
+    background: #fff;
+    border: 1px solid #e3e7ef;
+    border-radius: 12px;
+    padding: 20px;
+}
+
+/* .empty-hint（"从左侧选择或创建一个测试任务"）已随 D-037 拆页移除，规则一并删除 */
+
+.detail-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 6px;
+}
+
+.wf-title {
+    font-size: 18px;
+    color: #1f2740;
+    /* 标题行右侧还有状态徽章与返回按钮：长任务名要能换行，不能把按钮挤出视野 */
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.status-badge {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+
+.status-created { background: #f0f2f6; color: #5a6478; }
+.status-analyzing, .status-generating { background: #e8f0fe; color: #2f6fed; }
+.status-waiting_review { background: #fff4e5; color: #c77700; }
+.status-completed { background: #e6f7ec; color: #1a9c5d; }
+.status-failed { background: #fdeaea; color: #d64545; }
+
+.error-text {
+    color: #d64545;
+    font-size: 13px;
+    margin: 6px 0 10px;
+}
+
+/* 步骤条 */
+.steps {
+    list-style: none;
+    display: flex;
+    gap: 6px;
+    margin: 14px 0 18px;
+    flex-wrap: wrap;
+}
+
+.steps li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #98a1b3;
+    padding: 5px 10px;
+    border: 1px dashed #d7dde8;
+    border-radius: 999px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+}
+
+.steps li:hover {
+    transform: scale(1.06);
+}
+
+.steps li.has-content {
+    cursor: pointer;
+}
+
+.steps li.selected {
+    border-style: solid;
+    border-color: #2f6fed;
+    box-shadow: 0 1px 5px rgba(47, 111, 237, 0.3);
+    color: #2f6fed;
+}
+
+.steps li .step-index {
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    text-align: center;
+    border-radius: 50%;
+    background: #eef1f6;
+    font-size: 11px;
+    flex-shrink: 0;
+}
+
+.steps li.done {
+    color: #1a9c5d;
+    border-style: solid;
+    border-color: #b8e6cb;
+    background: #f2fbf6;
+}
+
+.steps li.done .step-index {
+    background: #1a9c5d;
+    color: #fff;
+}
+
+.steps li.active {
+    color: #2f6fed;
+    border-style: solid;
+    border-color: #b9d1fb;
+    background: #f0f6ff;
+    font-weight: 600;
+}
+
+.steps li.active .step-index {
+    background: #2f6fed;
+    color: #fff;
+}
+
+.steps li.loading {
+    color: #2f6fed;
+    border-style: solid;
+    border-color: #b9d1fb;
+    background: #f0f6ff;
+    font-weight: 600;
+}
+
+.steps li.loading .step-index {
+    font-size: 0;
+    background: transparent;
+    border: 2px solid #b9d1fb;
+    border-top-color: #2f6fed;
+    animation: wf-spin 0.8s linear infinite;
+}
+
+@keyframes wf-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.version-badge {
+    display: inline-block;
+    font-size: 11px;
+    color: #5a6478;
+    background: #eef1f6;
+    border-radius: 999px;
+    padding: 1px 8px;
+    vertical-align: middle;
+}
+
+/* 需求原文 */
+.requirement-view {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #2c3345;
+    background: #f7f9fd;
+    border-left: 3px solid #98a1b3;
+    padding: 10px 14px;
+    border-radius: 6px;
+}
+
+/* 需求分析 / 测试点编辑器的公共部分（提示条、字段、卡片、折叠）都在 nav.css，
+   这里只放两个表单容器自己的差异。 */
+.analysis-form .form-label {
+    font-size: 12px;
+    color: #5a6478;
+    font-weight: 600;
+    margin: 12px 0 4px;
+}
+
+/* 分析表单是「区块卡 + 条目卡 + 添加按钮」的纵向堆叠：用 gap 统一间距，
+   卡片自身不再带外边距（.edit-card / .edit-section 的 margin 为 0） */
+#analysisForm {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+/* 检索结果 */
+.retrieved-view details {
+    border: 1px solid #e3e7ef;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    background: #fbfcfe;
+}
+
+.retrieved-view summary {
+    cursor: pointer;
+    font-size: 13px;
+    padding: 8px 12px;
+    color: #2c3345;
+    user-select: none;
+}
+
+.retrieved-view summary:hover {
+    color: #2f6fed;
+}
+
+.doc-content {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #4a5468;
+    padding: 0 12px 10px;
+    font-family: inherit;
+}
+
+/* 需求分析视图 */
+.analysis-view h3 {
+    font-size: 13px;
+    color: #5a6478;
+    margin: 10px 0 4px;
+}
+
+.analysis-view p,
+.analysis-view li {
+    font-size: 13px;
+    line-height: 1.6;
+    color: #2c3345;
+}
+
+.analysis-view ul {
+    padding-left: 18px;
+}
+
+.analysis-summary {
+    background: #f7f9fd;
+    border-left: 3px solid #2f6fed;
+    padding: 8px 12px;
+    border-radius: 6px;
+    margin-bottom: 4px;
+}
+
+.tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    margin-right: 6px;
+}
+
+.tag.high { background: #fdeaea; color: #d64545; }
+.tag.medium { background: #fff4e5; color: #c77700; }
+.tag.low { background: #eef1f6; color: #5a6478; }
+
+/* 用例表 */
+.table-wrap {
+    /* 纵向随页面整体滚动（与需求分析/知识库检索节点一致），仅横向在表格自身滚动 */
+    overflow-x: auto;
+}
+
+.cases-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.cases-table th,
+.cases-table td {
+    border: 1px solid #e3e7ef;
+    padding: 7px 9px;
+    text-align: left;
+    vertical-align: top;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.cases-table th {
+    background: #f7f9fd;
+    color: #5a6478;
+}
+
+/* 用例表（11 列，列序与 testbench.css 的 .case-grid 保持一致；测试点追溯与覆盖项
+   已合并为第 10 列）：固定列宽比例 + 窄屏横向滚动，避免某个长文本列把整表撑开 */
+.cases-table.case-grid {
+    table-layout: fixed;
+    min-width: 1120px;
+}
+
+.cases-table.case-grid th {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.cases-table.case-grid th:nth-child(1), .cases-table.case-grid td:nth-child(1) { width: 104px; }
+.cases-table.case-grid th:nth-child(2), .cases-table.case-grid td:nth-child(2) { width: 168px; }
+.cases-table.case-grid th:nth-child(3), .cases-table.case-grid td:nth-child(3) { width: 132px; }
+.cases-table.case-grid th:nth-child(4), .cases-table.case-grid td:nth-child(4) { width: 208px; }
+.cases-table.case-grid th:nth-child(5), .cases-table.case-grid td:nth-child(5) { width: 168px; }
+.cases-table.case-grid th:nth-child(6), .cases-table.case-grid td:nth-child(6) { width: 192px; }
+.cases-table.case-grid th:nth-child(7), .cases-table.case-grid td:nth-child(7) { width: 64px; }
+.cases-table.case-grid th:nth-child(8), .cases-table.case-grid td:nth-child(8) { width: 78px; }
+.cases-table.case-grid th:nth-child(9), .cases-table.case-grid td:nth-child(9) { width: 108px; }
+/* 第 10 列：测试点 / 覆盖项（合并列，两行分别是测试点与覆盖项编号） */
+.cases-table.case-grid th:nth-child(10), .cases-table.case-grid td:nth-child(10) { width: 172px; }
+.cases-table.case-grid th:nth-child(11), .cases-table.case-grid td:nth-child(11) { width: 168px; }
+
+/* 仅编号/优先级/自动化这类短列不换行（多值列允许换行，长文本列由 .cell-clamp 折叠） */
+.cases-table.case-grid td:nth-child(1),
+.cases-table.case-grid td:nth-child(7),
+.cases-table.case-grid td:nth-child(8) {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 覆盖报告 */
+.coverage-view p,
+.coverage-view li {
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.coverage-view .ok { color: #1a9c5d; }
+.coverage-view .warn { color: #c77700; }
+.coverage-view .bad { color: #d64545; }
+
+.coverage-metric {
+    display: inline-block;
+    background: #f7f9fd;
+    border: 1px solid #e3e7ef;
+    border-radius: 8px;
+    padding: 6px 12px;
+    margin: 0 10px 10px 0;
+    font-size: 13px;
+}
+
+/* 产物不完整提示（如用例输出被 max_tokens 截断后抢救出的部分结果） */
+.warn-banner {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border: 1px solid #f0d9a8;
+    border-radius: 8px;
+    background: #fdf6e7;
+    color: #8a6116;
+    font-size: 13px;
+}
+
+/* ---------- 测试点与设计策略（D-036） ---------- */
+
+.analysis-view .section-title {
+    margin: 16px 0 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #1f2740;
+}
+
+.analysis-view .muted {
+    color: #6b7386;
+    font-size: 12.5px;
+    line-height: 1.6;
+}
+
+.plan-list {
+    margin: 6px 0 0;
+    padding-left: 18px;
+}
+
+.plan-list li {
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: #4a5468;
+}
+
+/* 折叠卡片编辑器的公共样式（卡片 / 摘要行 / 字段 / 输入控件 / 区块折叠）在 nav.css，
+   工作流详情与用例集详情共用；这里只留需求分析的标签列宽差异——分析字段名更长
+   （"业务前置条件""歧义与待确认项"），标签列比测试点卡宽一档。 */
+#analysisForm .edit-field {
+    grid-template-columns: 96px minmax(0, 1fr);
+}
+
+/* ---------- 任务列表页 / 新建页（布局与知识库、测试用例集列表保持一致） ---------- */
+
+.main-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 0 30px;
+    overflow-y: auto;
+    /* 宽度交给 flex 分配：侧栏收起后自动占满（nav.css 的 .sidebar.collapsed） */
+    min-width: 0;
+}
+
+.page-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 30px 0 20px;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 26px;
+}
+
+.page-header-main { min-width: 0; }
+
+.page-title {
+    font-size: 1.9rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+}
+
+.page-subtitle {
+    color: var(--text-secondary);
+    font-size: 1rem;
+}
+
+/* 返回列表按钮（.back-btn）的共用配色见 nav.css「通用操作按钮」分节 */
+
+/* 标题行内：靠右、尺寸对齐同行的 .btn small（配色与 hover 由 nav.css 统一提供） */
+.page-header .back-btn,
+.detail-header .back-btn {
+    margin-left: auto;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 400;
+    flex-shrink: 0;
+}
+
+.list-container { flex: 1; }
+
+.list-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 25px;
+    flex-wrap: wrap;
+    gap: 20px;
+}
+
+/* 新建工作流任务按钮（.create-btn）的共用配色见 nav.css「通用操作按钮」分节 */
+/* 搜索框（.search-box）的共用样式见 nav.css「列表页搜索框」分节 */
+
+.list-area {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 24px;
+    margin-bottom: 24px;
+}
+
+/* 列表卡片的卡壳 / 可点主体 / 操作行（.list-card、.list-card-link、.list-card-actions）
+   与操作按钮配色统一在 nav.css「列表卡片」公共分节（工作流 / 用例集 / 知识库三页共用），
+   这里只保留工作流卡片自身的内容排版。 */
+
+.task-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.task-card-title {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.task-card-excerpt {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.task-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin-top: auto;
+}
+
+.task-card-meta i { margin-right: 5px; }
+
+.task-card-meta .meta-file {
+    overflow-wrap: anywhere;
+}
+
+.loading-state,
+.empty-state,
+.error-state {
+    text-align: center;
+    color: var(--text-secondary);
+    padding: 60px 20px;
+    grid-column: 1 / -1;
+}
+
+.loading-state i,
+.empty-state i,
+.error-state i {
+    font-size: 42px;
+    margin-bottom: 12px;
+    color: #cbd5e1;
+    display: block;
+}
+
+.empty-state h3 {
+    margin-bottom: 8px;
+    color: var(--text-primary);
+}
+
+.empty-state .btn,
+.error-state .btn { margin-top: 14px; display: inline-block; }
+
+.pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 8px 0 24px;
+}
+
+.pager-info {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+/* ---------- 列表页重命名弹窗 ----------
+   .modal / .form-group 这套目前仍是各页自持（knowledge.css、testbench.css 各一份），
+   未提到 nav.css：nav.css 在所有页面 CSS 之后加载，同一套选择器写进去会连带改掉另两页的弹窗观感。 */
+
+.modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    z-index: 1500;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.modal.active { display: flex; }
+
+.modal-content {
+    background: #fff;
+    border-radius: var(--border-radius);
+    padding: 22px;
+    width: min(480px, 92vw);
+    max-height: 88vh;
+    overflow-y: auto;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.modal-title {
+    font-size: 16px;
+    margin: 0;
+    color: #1f2740;
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 15px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: var(--transition);
+}
+
+.close-btn:hover { background: var(--hover-color); }
+
+.form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #1f2740;
+}
+
+.form-group input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d7dde8;
+    border-radius: 8px;
+    font-size: 14px;
+    font-family: inherit;
+}
+
+.form-group input:focus {
+    outline: none;
+    border-color: #2f6fed;
+    box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.12);
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.form-container {
+    /* 宽度随屏宽变化：铺满内容区（与列表页卡片、详情页面板一致），不再写死 860px 阅读宽度。
+       超宽屏的封顶与居中见下面的 .form-page 规则；窄屏由 .main-content 的内边距与文件末尾的 @media 收敛。 */
+    width: 100%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    flex: 1;
+}
+
+/* ---------- 宽屏可读宽度（新建页表单列 / 详情页正文块共用同一取值） ----------
+   随视口变宽，超过阅读宽度后封顶：2560/3440 屏上正文不会被拉成上千像素的长行。 */
+:root { --wf-reading: clamp(860px, 62vw, 1080px); }
+
+/* 新建页（.form-page）：标题行与表单共用同一条列；只铺满不居中的话右侧会空出一大片 */
+.form-page .page-header,
+.form-page .form-container {
+    width: 100%;
+    max-width: var(--wf-reading);
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* 详情页的正文块：只收行宽，不居中也不动面板标题——页头、步骤条、各面板标题与正文保持同一条左边缘。
+   含表格/代码块的面板刻意不收：#casesPanel（11 列用例表）、#testPointPanel（6 列测试点表）、
+   #retrievedPanel（检索片段是 pre 文本，收窄会把 Markdown 表格折散）。 */
+#requirementPanel .requirement-view,
+#reviewPanel .analysis-view,
+#reviewPanel .analysis-form,
+#coveragePanel .coverage-view {
+    max-width: var(--wf-reading);
+}
+
+/* ---------- 窄屏（≤768px）：列表页 / 新建页 / 详情页统一收敛 ----------
+   本块必须留在文件末尾：媒体查询不提升优先级，同特异性的规则由源码顺序决胜，
+   写在被覆盖的规则之前会整块失效（原先针对 .workflow-side 的那条就是这样失效的）。 */
+
+@media (max-width: 768px) {
+    .main-content { padding: 0 16px; }
+    /* 顶部留出固定汉堡按钮的位置（nav.css 的 .mobile-menu-btn，44px @ top 16px），与用例集页同一写法 */
+    .page-header { padding: 52px 0 16px; margin-bottom: 20px; gap: 12px; }
+    .page-title { font-size: 1.5rem; }
+    .page-subtitle { font-size: 0.95rem; }
+
+    /* 主操作按钮与搜索框各占一行；搜索框占满整行的规则统一在 nav.css 的窄屏块里 */
+    .list-header { flex-direction: column; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+    /* 卡片网格的最小列宽是 320px，≤360px 视口会撑出横向滚动 */
+    .list-area { grid-template-columns: 1fr; gap: 16px; }
+    .pager { flex-wrap: wrap; gap: 8px; }
+
+    .form-container { gap: 12px; }
+    /* iOS 在字号 <16px 的输入框聚焦时会自动放大整页（含测试点编辑器的字段） */
+    .wf-input,
+    .wf-textarea,
+    .wf-textarea.mono,
+    .analysis-form .edit-input,
+    .analysis-form .edit-select { font-size: 16px; }
+
+    /* 窄屏下标签列收窄，给字段多留一点宽度 */
+    .analysis-form .edit-field { grid-template-columns: 60px minmax(0, 1fr); gap: 6px; }
+
+    /* 需求分析的标签更长（"业务前置条件""歧义与待确认项"），窄屏改成标签在上、控件在下，
+       避免标签被 60px 挤成竖排或压住输入框 */
+    #analysisForm .edit-field { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+
+    /* 详情页：标题行（标题 + 状态 + 开始任务 + 返回列表）换行，卡片内边距收紧并避开汉堡按钮 */
+    .workflow-body { flex-direction: column; padding: 52px 16px 12px; gap: 12px; }
+    .workflow-main { padding: 16px; }
+    .detail-header { flex-wrap: wrap; gap: 8px; }
+}
+

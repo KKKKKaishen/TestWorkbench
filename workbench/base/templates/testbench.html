@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>测试用例集 - AI智能测试平台</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/testbench.css">
+    <link rel="stylesheet" href="/static/css/nav.css">
+</head>
+<body>
+    {% set active_nav = 'testbench' %}
+    <div class="app-container">
+        {% include "partials/sidebar.html" %}
+
+        <main class="main-content">
+            <header class="tb-header">
+                <h1 class="tb-title">测试用例集</h1>
+                <p class="tb-subtitle">管理您的测试用例集：来自测试工作流的用例在此沉淀，可编辑、可版本化、可回滚</p>
+            </header>
+
+            <div class="list-container">
+                <div class="list-header">
+                    <a class="import-btn" href="/workflow-new"><i class="fas fa-plus"></i> 创建新用例集</a>
+                    <div class="search-box">
+                        <i class="fas fa-search"></i>
+                        <input type="text" placeholder="搜索用例集..." id="searchInput">
+                    </div>
+                </div>
+
+                <div class="list-area" id="testSetList"></div>
+
+                <div class="empty-state" id="emptyState" hidden>
+                    <i class="fas fa-toolbox"></i>
+                    <h3>暂无测试用例集</h3>
+                    <p>在「测试工作流」中生成用例后，点击「保存到用例集」即可把用例沉淀到这里</p>
+                </div>
+            </div>
+
+            <!-- 重命名用例集对话框 -->
+            <div class="modal" id="renameModal" role="dialog" aria-modal="true" aria-labelledby="renameModalTitle">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 class="modal-title" id="renameModalTitle">重命名用例集</h3>
+                        <button class="close-btn" id="renameCloseBtn"><i class="fas fa-times"></i></button>
+                    </div>
+                    <div class="form-group">
+                        <label for="renameInput">用例集名称</label>
+                        <input type="text" id="renameInput" maxlength="200" placeholder="输入新的名称">
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-secondary" id="renameCancelBtn">取消</button>
+                        <button type="button" class="btn-primary" id="renameConfirmBtn">保存</button>
+                    </div>
+                </div>
+            </div>
+
+            <footer class="footer-note">
+                <p>© <span class="js-nav-year"></span> AI智能测试系统</p>
+            </footer>
+        </main>
+    </div>
+
+    <script src="/static/js/nav.js"></script>
+    <script src="/static/js/common.js"></script>
+    <script src="/static/js/testbench.js"></script>
+</body>
+</html>

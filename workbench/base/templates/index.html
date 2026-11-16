@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI智能测试平台</title>
+    <link rel="stylesheet" href="/static/css/chat.css">
+    <link rel="stylesheet" href="/static/css/nav.css">
+    <script src="/static/vendor/marked.min.js"></script>
+    <script src="/static/vendor/purify.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+</head>
+<body>
+    {% set active_nav = 'chat' %}
+    <div class="app-container">
+        {% include "partials/sidebar.html" %}
+
+        <!-- 右侧主内容区 -->
+        <main class="main-content">
+            <header class="chat-header">
+                <h1 class="chat-header-title" id="chatHeaderTitle">选择场景和知识库进行对话</h1>
+            </header>
+
+            <section class="chat-messages" role="log" aria-live="polite" aria-label="聊天记录" id="chatMessages">
+            </section>
+
+            <!-- 输入区域 -->
+            <div class="input-container">
+                <div class="attachment-bar" id="attachmentBar" hidden></div>
+                <div class="input-area">
+                    <textarea class="chat-input" placeholder="输入您的问题..." aria-label="聊天输入框" id="chatInput"></textarea>
+                    <div class="input-toolbar">
+                        <div class="scenario-selector" id="scenarioSelector">
+                            <button type="button" class="scenario-trigger" id="scenarioTrigger" aria-haspopup="true" aria-expanded="false">
+                                <i class="scenario-icon fas fa-lightbulb" id="scenarioTriggerIcon"></i>
+                                <span id="scenarioTriggerLabel">需求澄清</span>
+                                <i class="fas fa-chevron-down scenario-caret"></i>
+                            </button>
+                            <div class="scenario-menu" id="scenarioMenu" role="listbox" aria-label="功能场景">
+                                <button type="button" class="scenario-option active" data-scenario="requirement_clarification" role="option" aria-selected="true">
+                                    <i class="scenario-icon fas fa-lightbulb"></i><span class="scenario-name">需求澄清</span><i class="fas fa-check scenario-check"></i>
+                                </button>
+                                <button type="button" class="scenario-option" data-scenario="product_manual" role="option" aria-selected="false">
+                                    <i class="scenario-icon fas fa-book"></i><span class="scenario-name">产品指南</span><i class="fas fa-check scenario-check"></i>
+                                </button>
+                                <button type="button" class="scenario-option" data-scenario="devops_tool" role="option" aria-selected="false">
+                                    <i class="scenario-icon fas fa-tools"></i><span class="scenario-name">运维助手</span><i class="fas fa-check scenario-check"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="kb-selector" id="kbSelector">
+                            <button type="button" class="kb-trigger" id="kbTrigger" aria-haspopup="true" aria-expanded="false" data-tip="选择知识库">
+                                <i class="kb-icon fas fa-book"></i>
+                                <span id="kbTriggerLabel">普通对话</span>
+                                <i class="fas fa-chevron-down scenario-caret"></i>
+                            </button>
+                            <div class="kb-menu" id="kbMenu" role="listbox" aria-label="选择知识库">
+                                <!-- 知识库选项将通过JS动态添加 -->
+                            </div>
+                        </div>
+                        <div class="input-actions">
+                            <button class="action-btn" aria-label="附加文件" id="attachBtn" data-tip="附加 PDF 文档">📎</button>
+                            <button class="send-btn" aria-label="发送" id="sendBtn" disabled>➤</button>
+                        </div>
+                    </div>
+                </div>
+                <input type="file" id="fileInput" accept=".pdf,application/pdf" hidden>
+            </div>
+
+            <footer class="footer-note">
+                <p>© <span class="js-nav-year"></span> AI智能测试系统</p>
+            </footer>
+        </main>
+    </div>
+
+<script src="/static/js/nav.js"></script>
+<script src="/static/js/common.js"></script>
+<script src="/static/js/chat.js"></script>
+</body>
+</html>

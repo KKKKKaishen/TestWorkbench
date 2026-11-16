@@ -1,0 +1,26 @@
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+# chroma_db/
+fastapi_venv/*
+.venv/
+.env
+chroma_db/*
+temp_uploads/*
+uploads/*
+CLAUDE.md
+AGENTS.md
+
+# 本地工具与缓存
+.pytest_cache/
+.vscode/
+.zcode/
+.zcodeignore
+
+# 本地归档
+*.zip
+
+# 运行数据目录（langgraph checkpoint 等）
+data/

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>测试工作流 - AI智能测试平台</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/workflow.css">
+    <link rel="stylesheet" href="/static/css/nav.css">
+</head>
+<body>
+    {% set active_nav = 'workflow' %}
+    <div class="app-container">
+        {% include "partials/sidebar.html" %}
+
+        <main class="main-content">
+            <header class="page-header">
+                <div class="page-header-main">
+                    <h1 class="page-title">测试工作流</h1>
+                    <p class="page-subtitle">管理您的测试工作流：从需求原文出发，经人工确认逐步生成测试用例</p>
+                </div>
+            </header>
+
+            <div class="list-container">
+                <div class="list-header">
+                    <a class="create-btn" href="/workflow-new"><i class="fas fa-plus"></i> 新建测试工作流</a>
+                    <div class="search-box">
+                        <i class="fas fa-search"></i>
+                        <input type="text" placeholder="搜索测试工作流..." id="searchInput" aria-label="搜索测试工作流">
+                    </div>
+                </div>
+
+                <div class="list-area" id="workflowList">
+                    <div class="loading-state"><i class="fas fa-spinner fa-spin"></i><p>加载测试工作流...</p></div>
+                </div>
+
+                <div class="empty-state" id="emptyState" hidden>
+                    <i class="fas fa-clipboard-list"></i>
+                    <h3 id="emptyTitle">暂无测试工作流</h3>
+                    <p id="emptyHint">点击「新建测试工作流」创建您的第一个测试工作流</p>
+                </div>
+
+                <div class="pager" id="pager" hidden>
+                    <button type="button" class="btn small" id="prevPageBtn">上一页</button>
+                    <span class="pager-info" id="pageInfo" role="status"></span>
+                    <button type="button" class="btn small" id="nextPageBtn">下一页</button>
+                </div>
+            </div>
+
+            <!-- 重命名测试工作流对话框（删除走原生 confirm，与用例集列表页一致） -->
+            <div class="modal" id="renameModal" role="dialog" aria-modal="true" aria-labelledby="renameModalTitle">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 class="modal-title" id="renameModalTitle">重命名测试工作流</h3>
+                        <button class="close-btn" id="renameCloseBtn" aria-label="关闭"><i class="fas fa-times"></i></button>
+                    </div>
+                    <div class="form-group">
+                        <label for="renameInput">测试工作流名称</label>
+                        <input type="text" id="renameInput" maxlength="200" placeholder="输入新的名称">
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn" id="renameCancelBtn">取消</button>
+                        <button type="button" class="btn primary" id="renameConfirmBtn">保存</button>
+                    </div>
+                </div>
+            </div>
+
+            <footer class="footer-note">
+                <p>© <span class="js-nav-year"></span> AI智能测试系统</p>
+            </footer>
+        </main>
+    </div>
+
+    <script src="/static/js/nav.js"></script>
+    <script src="/static/js/common.js"></script>
+    <script src="/static/js/workflow_list.js"></script>
+</body>
+</html>

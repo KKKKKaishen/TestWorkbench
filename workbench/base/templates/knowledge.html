@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI智能测试平台</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/knowledge.css">
+    <link rel="stylesheet" href="/static/css/nav.css">
+</head>
+<body>
+    {% set active_nav = 'knowledge' %}
+    <div class="app-container">
+        {% include "partials/sidebar.html" %}
+
+        <!-- 右侧主内容区 -->
+        <main class="main-content">
+            <header class="lib-header">
+                <p class="lib-subtitle">管理您的知识库，整理和存储重要信息</p>
+            </header>
+
+            <!-- 列表头部 -->
+            <div class="list-container">
+                <div class="list-header">
+
+                            <button class="create-btn" id="createLibBtn">
+            <i class="fas fa-plus"></i> 新建知识库
+        </button>
+                    <div class="search-box">
+                        <i class="fas fa-search"></i>
+                        <input type="text" placeholder="搜索知识库..." id="searchInput">
+                    </div>
+                </div>
+
+                <!-- 列表区域 -->
+                <div class="list-area" id="knowledgeList">
+                    <!-- 知识库卡片将通过JS动态生成 -->
+                </div>
+
+                <!-- 空状态 -->
+                <div class="empty-state" id="emptyState" style="display: none;">
+                    <i class="fas fa-database"></i>
+                    <h3>暂无知识库</h3>
+                    <p>点击上方按钮创建您的第一个知识库</p>
+                </div>
+
+            </div>
+
+            <footer class="footer-note">
+                <p>© <span class="js-nav-year"></span> AI智能测试系统</p>
+            </footer>
+        </main>
+    </div>
+
+    <!-- 创建知识库模态框 -->
+    <div class="modal" id="createModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">创建知识库</h3>
+                <button class="close-btn" id="closeModalBtn">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+
+            <form id="createForm">
+                <div class="form-group">
+                    <label for="libName">知识库名称</label>
+                    <input type="text" id="libName" placeholder="请输入知识库名称" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="libDescription">描述（可选）</label>
+                    <textarea id="libDescription" placeholder="请描述这个知识库的主要内容和用途"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="libVisibility">可见性</label>
+                    <select id="libVisibility" style="width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:0.95rem;">
+                        <option value="private">私有 - 仅自己可见</option>
+                        <option value="shared">共享 - 所有人可查看和使用</option>
+                    </select>
+                </div>
+
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="cancelBtn">取消</button>
+                    <button type="submit" class="btn-primary">创建知识库</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>window.currentUserId = {{ user_id }};</script>
+    <script src="/static/js/nav.js"></script>
+    <script src="/static/js/common.js"></script>
+    <script src="/static/js/knowledge.js"></script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+/* 测试深度工作台 · 全局样式（明亮浅色基调） */
+:root {
+  --wb-bg: #f5f7fa;
+  --wb-panel: #ffffff;
+  --wb-border: #e4e7ed;
+  --wb-text: #303133;
+  --wb-text-sub: #909399;
+  --wb-accent: #3a7afe;
+  --wb-accent-soft: #ecf2ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #app { height: 100%; }
+
+body {
+  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 14px;
+  color: var(--wb-text);
+  background: var(--wb-bg);
+}
+
+.page { padding: 20px 24px; overflow-y: auto; height: calc(100vh - 52px); }
+
+.page-title { font-size: 18px; font-weight: 600; margin-bottom: 16px; color: var(--wb-text); }
+
+.card {
+  background: var(--wb-panel);
+  border: 1px solid var(--wb-border);
+  border-radius: 10px;
+  padding: 18px;
+}
+
+.mb12 { margin-bottom: 12px; }
+.mb16 { margin-bottom: 16px; }
+
+.muted { color: var(--wb-text-sub); font-size: 13px; }
+
+/* ---------- Element Plus radio-button 边框修复 ----------
+   EP 2.x 用 outline 画按钮组边框，在 WebView2/高分屏缩放下左、上边框易丢失。
+   统一改为真实 border，保证四边完整显示。 */
+.el-radio-button__inner { outline: none; border: 1px solid var(--el-border-color); }
+.el-radio-button:not(:first-child) .el-radio-button__inner { margin-left: -1px; }
+.el-radio-button:not(:first-child) .el-radio-button__inner:hover { position: relative; z-index: 1; }
+.el-radio-button.is-active .el-radio-button__inner { position: relative; z-index: 2; }
