@@ -351,3 +351,14 @@ CREATE TABLE wb_ai_call_logs (
   created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '调用时间',
   KEY idx_scene_time (scene, created_at)
 ) COMMENT 'AI 调用流水（成本/成功率观测，设置界面展示用量统计）';
+
+CREATE TABLE wb_kb_chunks (
+  id          BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增ID',
+  kb_id       VARCHAR(36) NOT NULL COMMENT '底座知识库ID（knowledge_bases.id，项目映射）',
+  file_id     VARCHAR(36) NOT NULL COMMENT '底座知识文件ID（knowledge_files.id）',
+  chunk_no    INT         NOT NULL DEFAULT 0 COMMENT '分块序号（从0起）',
+  content     MEDIUMTEXT  NOT NULL COMMENT '分块正文（关键词检索通道）',
+  created_at  DATETIME    NULL DEFAULT CURRENT_TIMESTAMP COMMENT '写入时间',
+  KEY ix_wb_kb_chunks_kb_id (kb_id),
+  KEY ix_wb_kb_chunks_file_id (file_id)
+) COMMENT '知识库文档分块（关键词检索通道；语义检索走底座 ChromaDB 向量库）';

@@ -7,7 +7,7 @@ import re
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -2292,3 +2292,451 @@ def test_model(provider: str = "deepseek", db: Session = Depends(get_db)):
         raise HTTPException(400, f"HTTP {e.code}: {detail}")
     except Exception as e:
         raise HTTPException(400, f"连通失败: {e}")
+
+
+# ================= 知识库（K-01~03：桥接底座 knowledge_service/ChromaDB） =================
+#
+# 设计：每个工作坊项目对应底座 knowledge_bases 表中的一个库（description 存
+# workshop_project:{id} 标记做映射，不改底座表结构）。文件复用底座
+# KnowledgeFile 表与向量化管线（DocumentProcessor.save_to_chroma），检索复用
+# ChromaRetriever。项目隔离 = 库映射；owner_user_id 置 None（单机无用户体系）。
+
+
+_KB_ALLOWED_EXT = {".pdf", ".docx", ".md", ".txt"}
+_KB_MARKER_PREFIX = "workshop_project:"
+
+
+def _decrypt_wb_secret(db: Session, setting_key: str) -> str | None:
+    """读取工作坊设置项并解密（is_secret=1 时为 Fernet 密文）。"""
+    s = db.query(wb.WbSetting).filter(wb.WbSetting.setting_key == setting_key).first()
+    if not s or not s.setting_value:
+        return None
+    if s.is_secret:
+        try:
+            return _secret_cipher().decrypt(s.setting_value.encode()).decode()
+        except Exception:
+            return None
+    return s.setting_value
+
+
+def _ensure_embedding_ready(db: Session) -> str | None:
+    """确保 embedding 可用：优先 .env 的 EMBEDDING_API_KEY，缺失时回退设置页
+    配置的通义千问（DashScope）key——text-embedding-v4 即 DashScope 模型。
+    返回就绪来源（'env'/'settings'/None）。"""
+    import os
+
+    from config import get_embedding_config
+
+    key = os.getenv("EMBEDDING_API_KEY", "").strip()
+    if key:
+        return "env"
+    qwen_key = _decrypt_wb_secret(db, "ai.qwen.api_key")
+    if not qwen_key:
+        return None
+    os.environ["EMBEDDING_API_KEY"] = qwen_key
+    if not os.getenv("EMBEDDING_BASE_URL", "").strip():
+        os.environ["EMBEDDING_BASE_URL"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    get_embedding_config.cache_clear()
+    return "settings"
+
+
+def _get_project_kb(db: Session, project_id: int):
+    """取或创建项目对应的知识库（get-or-create）。"""
+    from models.knowledge_models import KnowledgeBase
+
+    marker = f"{_KB_MARKER_PREFIX}{project_id}"
+    kb = db.query(KnowledgeBase).filter(KnowledgeBase.description == marker).first()
+    if kb:
+        return kb
+    import uuid as _uuid
+
+    kb = KnowledgeBase(
+        name=f"项目知识库 #{project_id}",
+        description=marker,
+        collection_name=f"wbkb_{_uuid.uuid4().hex[:16]}",
+        owner_user_id=None,
+        visibility="private",
+    )
+    db.add(kb)
+    db.commit()
+    db.refresh(kb)
+    return kb
+
+
+def _load_wb_document(file_path: str):
+    """按扩展名加载并分块文档（pdf 走底座版面还原链路，docx/md/txt 走纯文本分块）。"""
+    from langchain_core.documents import Document
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    from utils.file_handle import get_document_processor
+
+    ext = Path(file_path).suffix.lower()
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000, chunk_overlap=200,
+        separators=["\n\n", "。", "！", "？", "\n", " ", ""],
+    )
+
+    if ext == ".pdf":
+        return get_document_processor().load_pdf(file_path)
+
+    text = ""
+    if ext == ".docx":
+        from docx import Document as DocxDocument
+
+        d = DocxDocument(file_path)
+        parts = [p.text for p in d.paragraphs if p.text.strip()]
+        for table in d.tables:
+            for r in table.rows:
+                cells = [c.text.strip() for c in r.cells]
+                if any(cells):
+                    parts.append("| " + " | ".join(cells) + " |")
+        text = "\n".join(parts)
+    else:  # .md / .txt
+        text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+
+    text = text.strip()
+    if not text:
+        return []
+    source = Path(file_path).name
+    chunks = splitter.split_text(text)
+    return [Document(page_content=c, metadata={"source": source}) for c in chunks if c.strip()]
+
+
+def _process_wb_document(file_id: str, kb_id: str):
+    """后台处理工作坊知识文档：解析 → 分块 → MySQL 分块表（关键词检索通道）
+    + 向量化入 Chroma（语义检索通道，配置 Embedding Key 后启用）。"""
+    import logging as _logging
+
+    from models.knowledge_models import KnowledgeBase, KnowledgeFile
+    from services.knowledge_service import (
+        _refresh_kb_file_count,
+        resolve_upload_path,
+    )
+    from utils.file_handle import get_document_processor
+
+    log = _logging.getLogger("wb.knowledge")
+    from models.database import create_session
+
+    with create_session() as db:
+        try:
+            fr = (db.query(KnowledgeFile)
+                  .filter(KnowledgeFile.id == file_id, KnowledgeFile.knowledge_base_id == kb_id)
+                  .first())
+            if not fr:
+                log.error("知识文档记录不存在: %s", file_id)
+                return
+            fr.status = "processing"
+            db.commit()
+
+            path = resolve_upload_path(fr.file_path)
+            if not path.exists():
+                db.delete(fr)
+                _refresh_kb_file_count(db, kb_id)
+                db.commit()
+                return
+
+            splits = _load_wb_document(str(path))
+            kb = db.get(KnowledgeBase, kb_id)
+
+            # 通道一：分块入 MySQL（关键词检索，无外部依赖、始终可用）
+            db.query(wb.WbKbChunk).filter(wb.WbKbChunk.file_id == file_id).delete()
+            for i, sp in enumerate(splits):
+                text = (sp.page_content or "").strip()
+                if text:
+                    db.add(wb.WbKbChunk(kb_id=kb_id, file_id=file_id, chunk_no=i, content=text))
+
+            # 通道二：向量化入 Chroma（语义检索，Embedding Key 就绪时启用）
+            chunk_count, skipped = 0, 0
+            embed_ok = _ensure_embedding_ready(db) is not None
+            if embed_ok and splits:
+                chunk_count, skipped = get_document_processor().save_to_chroma(
+                    splits=splits, collection_name=kb.collection_name,
+                    file_metadata={"file_id": fr.id, "filename": fr.filename,
+                                   "knowledge_base_id": kb_id},
+                )
+                if splits and chunk_count == 0:
+                    raise RuntimeError("所有分片向量化失败，未能写入向量库")
+
+            fr.chunk_count = chunk_count or sum(1 for sp in splits if (sp.page_content or "").strip())
+            fr.skipped_chunks = skipped
+            if skipped and skipped / max(1, chunk_count + skipped) >= 0.2:
+                fr.status = "failed"
+                fr.error = f"{skipped}/{chunk_count + skipped} 个分片向量化失败，请重试"
+            else:
+                fr.status = "completed"
+                fr.error = f"{skipped}/{chunk_count + skipped} 个分片被跳过" if skipped else None
+            _refresh_kb_file_count(db, kb_id)
+            db.commit()
+            log.info("知识文档处理完成: %s, 分片 %d, 跳过 %d, 语义索引 %s",
+                     fr.filename, fr.chunk_count, skipped, "OK" if embed_ok else "未配置Key(仅关键词检索)")
+        except Exception as e:
+            db.rollback()
+            fr = (db.query(KnowledgeFile)
+                  .filter(KnowledgeFile.id == file_id, KnowledgeFile.knowledge_base_id == kb_id)
+                  .first())
+            if fr:
+                fr.status = "failed"
+                fr.error = str(e)[:500]
+                db.commit()
+            log.error("知识文档处理失败: %s", e, exc_info=True)
+
+
+def _process_wb_document_in_pool(file_id: str, kb_id: str):
+    """在底座文档线程池中执行（避免并发上传挤占请求线程）。"""
+    from services.knowledge_service import get_document_pool
+
+    get_document_pool().submit(_process_wb_document, file_id, kb_id).result()
+
+
+class KnowledgeSearchBody(BaseModel):
+    project_id: int
+    query: str
+    top_k: int = 5
+
+
+@router.get("/knowledge")
+def list_knowledge(project_id: int, db: Session = Depends(get_db)):
+    """项目知识文档列表 + embedding 就绪状态。"""
+    from models.knowledge_models import KnowledgeBase, KnowledgeFile
+
+    marker = f"{_KB_MARKER_PREFIX}{project_id}"
+    kb = db.query(KnowledgeBase).filter(KnowledgeBase.description == marker).first()
+    files = []
+    if kb:
+        files = (db.query(KnowledgeFile)
+                 .filter(KnowledgeFile.knowledge_base_id == kb.id)
+                 .order_by(KnowledgeFile.uploaded_at.desc()).all())
+    return {
+        "kb_id": kb.id if kb else None,
+        "embedding_ready": _ensure_embedding_ready(db) is not None,
+        "files": [
+            row(f, "id", "filename", "file_size", "file_type", "status",
+                "chunk_count", "skipped_chunks", "error", "uploaded_at")
+            for f in files
+        ],
+    }
+
+
+@router.post("/knowledge/upload")
+async def upload_knowledge_file(
+    background_tasks: BackgroundTasks,
+    project_id: int = Query(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """上传知识文档（pdf/docx/md/txt ≤50MB），后台分块入库（Embedding Key 就绪时同步向量化）。"""
+    import hashlib
+    import uuid as _uuid
+
+    from models.knowledge_models import KnowledgeFile
+    from services.knowledge_service import (
+        _refresh_kb_file_count,
+        get_upload_root,
+    )
+
+    if not file.filename:
+        raise HTTPException(400, "文件名不能为空")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in _KB_ALLOWED_EXT:
+        raise HTTPException(400, "仅支持 PDF / Word(docx) / Markdown / TXT 文件")
+
+    kb = _get_project_kb(db, project_id)
+    save_path = (get_upload_root() / f"{_uuid.uuid4().hex}{ext}").resolve()
+
+    try:
+        total_size = 0
+        digest = hashlib.sha256()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(save_path, "wb") as buf:
+            while chunk := file.file.read(1024 * 1024):
+                total_size += len(chunk)
+                if total_size > 50 * 1024 * 1024:
+                    raise HTTPException(400, "文件大小不能超过 50MB")
+                digest.update(chunk)
+                buf.write(chunk)
+        if total_size == 0:
+            raise HTTPException(400, "文件内容不能为空")
+
+        dup = (db.query(KnowledgeFile)
+               .filter(KnowledgeFile.knowledge_base_id == kb.id,
+                       KnowledgeFile.content_hash == digest.hexdigest(),
+                       KnowledgeFile.status != "failed")
+               .first())
+        if dup:
+            raise HTTPException(409, f"已存在相同内容的文件《{dup.filename}》，无需重复上传")
+
+        fr = KnowledgeFile(
+            knowledge_base_id=kb.id, filename=file.filename,
+            file_path=save_path.name, file_size=total_size,
+            file_type=ext.lstrip("."), status="pending",
+            content_hash=digest.hexdigest(),
+        )
+        db.add(fr)
+        db.commit()
+        _refresh_kb_file_count(db, kb.id)
+        db.refresh(fr)
+
+        background_tasks.add_task(_process_wb_document_in_pool, fr.id, kb.id)
+        return {"id": fr.id, "filename": fr.filename}
+    except HTTPException:
+        if save_path.exists():
+            save_path.unlink()
+        raise
+    except Exception as e:
+        if save_path.exists():
+            save_path.unlink()
+        raise HTTPException(500, f"上传失败: {e}")
+
+
+@router.delete("/knowledge/files/{file_id}")
+def delete_knowledge_file_wb(file_id: str, project_id: int, db: Session = Depends(get_db)):
+    """删除文档：先删向量再删记录（镜像底座顺序）。"""
+    from models.knowledge_models import KnowledgeBase, KnowledgeFile
+    from services.knowledge_service import _refresh_kb_file_count, resolve_upload_path
+    from utils.file_handle import get_document_processor
+
+    kb = _get_project_kb(db, project_id)
+    fr = (db.query(KnowledgeFile)
+          .filter(KnowledgeFile.id == file_id, KnowledgeFile.knowledge_base_id == kb.id)
+          .first())
+    if not fr:
+        raise HTTPException(404, "文档不存在")
+
+    if fr.status in ("completed", "failed"):
+        ok = get_document_processor().delete_documents_by_file_id(kb.collection_name, fr.id)
+        if not ok and fr.status == "completed":
+            raise HTTPException(500, "向量删除失败，请稍后重试")
+
+    # 清理关键词检索通道的分块
+    db.query(wb.WbKbChunk).filter(wb.WbKbChunk.file_id == fr.id).delete()
+
+    path = None
+    try:
+        path = resolve_upload_path(fr.file_path)
+    except HTTPException:
+        pass
+
+    db.delete(fr)
+    _refresh_kb_file_count(db, kb.id)
+    db.commit()
+    try:
+        if path and path.exists():
+            path.unlink()
+    except OSError:
+        pass
+    return {"ok": True}
+
+
+@router.post("/knowledge/files/{file_id}/retry")
+def retry_knowledge_file_wb(file_id: str, project_id: int,
+                            background_tasks: BackgroundTasks,
+                            db: Session = Depends(get_db)):
+    """重试失败文档（重置为 pending 并重新入队处理）。"""
+    from models.knowledge_models import KnowledgeFile
+
+    kb = _get_project_kb(db, project_id)
+    fr = (db.query(KnowledgeFile)
+          .filter(KnowledgeFile.id == file_id, KnowledgeFile.knowledge_base_id == kb.id)
+          .first())
+    if not fr:
+        raise HTTPException(404, "文档不存在")
+    fr.status = "pending"
+    fr.error = None
+    db.commit()
+    background_tasks.add_task(_process_wb_document_in_pool, fr.id, kb.id)
+    return {"ok": True}
+
+
+@router.post("/knowledge/files/{file_id}/reindex")
+def reindex_knowledge_file_wb(file_id: str, project_id: int,
+                              background_tasks: BackgroundTasks,
+                              db: Session = Depends(get_db)):
+    """重建索引：先清该文档的旧向量再重新处理。"""
+    from models.knowledge_models import KnowledgeFile
+    from utils.file_handle import get_document_processor
+
+    kb = _get_project_kb(db, project_id)
+    fr = (db.query(KnowledgeFile)
+          .filter(KnowledgeFile.id == file_id, KnowledgeFile.knowledge_base_id == kb.id)
+          .first())
+    if not fr:
+        raise HTTPException(404, "文档不存在")
+    get_document_processor().delete_documents_by_file_id(kb.collection_name, fr.id)
+    fr.status = "pending"
+    fr.error = None
+    db.commit()
+    background_tasks.add_task(_process_wb_document_in_pool, fr.id, kb.id)
+    return {"ok": True}
+
+
+@router.post("/knowledge/search")
+async def search_knowledge_wb(body: KnowledgeSearchBody, db: Session = Depends(get_db)):
+    """知识检索：配置 Embedding Key 时走 Chroma 语义检索；
+    未配置时回退 MySQL 分块表关键词检索（开箱即用）。"""
+    from models.knowledge_models import KnowledgeBase
+    from utils.file_handle import get_chromadb_client
+    from utils.retriever import ChromaRetriever
+
+    if not (body.query or "").strip():
+        raise HTTPException(400, "检索内容不能为空")
+
+    marker = f"{_KB_MARKER_PREFIX}{body.project_id}"
+    kb = db.query(KnowledgeBase).filter(KnowledgeBase.description == marker).first()
+    if not kb:
+        return {"results": [], "total_chunks": 0, "mode": "keyword"}
+
+    top_k = max(1, min(body.top_k or 5, 20))
+
+    # 语义通道
+    if _ensure_embedding_ready(db):
+        client = get_chromadb_client()
+        try:
+            collection = client.get_collection(name=kb.collection_name)
+        except Exception:
+            collection = None
+        if collection and collection.count():
+            retriever = ChromaRetriever(collection_name=kb.collection_name, chroma_client=client)
+            try:
+                docs = await retriever.get_relevant_documents(body.query.strip(), n_results=top_k)
+            except Exception as e:
+                detail = str(e)
+                if "api_key" in detail.lower() or "401" in detail or "auth" in detail.lower():
+                    raise HTTPException(400, "Embedding 调用失败：API Key 无效或已过期")
+                raise HTTPException(500, f"检索失败: {detail[:200]}")
+            results = []
+            for d in docs:
+                meta = d.metadata or {}
+                results.append({
+                    "content": d.page_content,
+                    "source": meta.get("filename") or meta.get("source") or "",
+                    "page": meta.get("page"),
+                    "file_id": meta.get("file_id"),
+                })
+            return {"results": results, "total_chunks": collection.count(), "mode": "semantic"}
+
+    # 关键词通道（无 Embedding Key 或语义集合为空）
+    from models.knowledge_models import KnowledgeFile
+
+    terms = [t for t in re.split(r"[\s,，。;；]+", body.query.strip()) if t]
+    if not terms:
+        return {"results": [], "total_chunks": 0, "mode": "keyword"}
+
+    total = db.query(func.count(wb.WbKbChunk.id)).filter(wb.WbKbChunk.kb_id == kb.id).scalar() or 0
+    like = lambda t: f"%{t}%"
+    rows = (db.query(wb.WbKbChunk, KnowledgeFile.filename)
+            .outerjoin(KnowledgeFile, KnowledgeFile.id == wb.WbKbChunk.file_id)
+            .filter(wb.WbKbChunk.kb_id == kb.id)
+            .filter(or_(*[wb.WbKbChunk.content.like(like(t)) for t in terms]))
+            .all())
+
+    def score(content: str) -> int:
+        return sum(content.count(t) for t in terms)
+
+    ranked = sorted(rows, key=lambda r: score(r[0].content or ""), reverse=True)[:top_k]
+    results = [{
+        "content": r[0].content,
+        "source": r[1] or "(文件已删除)",
+        "page": None,
+        "file_id": r[0].file_id,
+    } for r in ranked]
+    return {"results": results, "total_chunks": total, "mode": "keyword"}

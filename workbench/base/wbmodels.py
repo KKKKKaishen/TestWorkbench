@@ -362,3 +362,17 @@ class WbAiCallLog(Base):
     error_msg = Column(String(500))
     created_at = Column(DateTime, default=func.now())
     __table_args__ = (Index("idx_ai_scene_time", "scene", "created_at"),)
+
+
+class WbKbChunk(Base):
+    """知识库文档分块（关键词检索通道；语义检索走底座 ChromaDB）。
+
+    与底座 knowledge_files 通过 file_id(VARCHAR36) 关联，project 隔离经 kb_id。
+    """
+    __tablename__ = "wb_kb_chunks"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    kb_id = Column(String(36), nullable=False, index=True)
+    file_id = Column(String(36), nullable=False, index=True)
+    chunk_no = Column(Integer, nullable=False, default=0)
+    content = Column(LongText, nullable=False)
+    created_at = Column(DateTime, default=func.now())

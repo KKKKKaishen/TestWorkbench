@@ -10,7 +10,7 @@ import Bugs from './pages/Bugs.vue'
 import Logs from './pages/Logs.vue'
 import Regression from './pages/Placeholder.vue'
 import Reports from './pages/Reports.vue'
-import Knowledge from './pages/Placeholder.vue'
+import Knowledge from './pages/Knowledge.vue'
 import Settings from './pages/Settings.vue'
 
 export const routes = [
@@ -26,6 +26,6 @@ export const routes = [
   { path: '/logs', component: Logs, meta: { title: '日志管理' } },
   { path: '/regression', component: Regression, meta: { title: '回归测试', building: true } },
   { path: '/reports', component: Reports, meta: { title: '测试报告' } },
-  { path: '/knowledge', component: Knowledge, meta: { title: '知识库', building: true } },
+  { path: '/knowledge', component: Knowledge, meta: { title: '知识库' } },
   { path: '/settings', component: Settings, meta: { title: '设置' } }
 ]
