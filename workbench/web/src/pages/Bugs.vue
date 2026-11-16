@@ -50,6 +50,7 @@
             <el-select v-model="detail.status" size="small" style="width:130px" @change="saveStatus">
               <el-option v-for="v in statusList" :key="v[0]" :value="v[0]" :label="v[1]" />
             </el-select>
+            <el-tag v-if="detail.regression_ready" size="small" type="success" style="margin-left:8px">回归已通过，可关闭</el-tag>
           </div>
           <div><span class="muted">严重程度：</span>{{ sevMap[detail.severity] }}</div>
           <div><span class="muted">优先级：</span>{{ detail.priority }}</div>
@@ -57,6 +58,10 @@
           <div><span class="muted">发现时间：</span>{{ detail.found_at }}</div>
           <div><span class="muted">关闭时间：</span>{{ detail.closed_at || '—' }}</div>
         </div>
+        <el-alert v-if="detail.status === 'fixed'" type="warning" :closable="false" show-icon style="margin-bottom:14px">
+          Bug 已修复待回归：请发起回归验证，全部通过后方可关闭（关闭前卡点 RG-04）。
+          <el-button size="small" type="primary" style="margin-left:8px" @click="openBugRegression">发起回归验证</el-button>
+        </el-alert>
         <div class="desc-block">{{ detail.description }}</div>
 
         <div class="sec-title">四向关联</div>
@@ -127,6 +132,36 @@
       <template #footer>
         <el-button @click="linkDlg = false">取消</el-button>
         <el-button type="primary" :disabled="!linkForm.targetId" @click="addLink">确认关联</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 回归验证弹窗（RG-04 定向回归） -->
+    <el-dialog v-model="regDlg" title="发起回归验证" width="560px">
+      <div style="margin-bottom:12px">
+        <span class="muted">关联用例（{{ regCaseIds.length }} 条）：</span>
+        <div v-if="regCases.length" class="reg-cases">
+          <div v-for="c in regCases" :key="c.link_id">{{ c.title || `用例 #${c.link_id}` }}</div>
+        </div>
+        <div v-else class="muted" style="font-size:12px">
+          该 Bug 尚未关联用例，请先在下方「添加关联」中关联用例，否则无法发起回归。
+        </div>
+      </div>
+      <el-form label-width="80px">
+        <el-form-item label="执行环境">
+          <el-select v-model="regEnvId" style="width:100%" clearable placeholder="默认环境">
+            <el-option v-for="e in regEnvs" :key="e.id" :value="e.id" :label="e.name" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <div class="muted" style="font-size:12px">
+        接口用例自动执行（失败自动重跑一次）；功能用例执行后在执行中心人工标记。
+        全部通过后即可关闭该 Bug。
+      </div>
+      <template #footer>
+        <el-button @click="regDlg = false">取消</el-button>
+        <el-button type="primary" :disabled="!regCaseIds.length" :loading="regExecuting" @click="execBugRegression">
+          开始回归
+        </el-button>
       </template>
     </el-dialog>
 
@@ -257,14 +292,60 @@ async function openDetail(row) {
 }
 
 async function saveStatus() {
-  await put(`/wb/bugs/${detail.value.id}`, {
-    project_id: detail.value.project_id, title: detail.value.title,
-    severity: detail.value.severity, priority: detail.value.priority,
-    description: detail.value.description, status: detail.value.status,
-    assignee: detail.value.assignee
-  })
-  ElMessage.success('状态已更新')
-  load()
+  try {
+    await put(`/wb/bugs/${detail.value.id}`, {
+      project_id: detail.value.project_id, title: detail.value.title,
+      severity: detail.value.severity, priority: detail.value.priority,
+      description: detail.value.description, status: detail.value.status,
+      assignee: detail.value.assignee
+    })
+    ElMessage.success('状态已更新')
+    load()
+  } catch (e) {
+    // RG-04 关闭卡点等后端拦截：恢复原状态并提示
+    ElMessage.error(e.message)
+    detail.value = await get(`/wb/bugs/${detail.value.id}`)
+  }
+}
+
+// ---- RG-04 Bug 定向回归 ----
+const regDlg = ref(false)
+const regCases = ref([])
+const regCaseIds = ref([])
+const regEnvs = ref([])
+const regEnvId = ref(null)
+const regExecuting = ref(false)
+
+async function openBugRegression() {
+  regCases.value = detail.value.links.filter(l => l.link_type === 'case')
+  regCaseIds.value = regCases.value.map(c => c.link_id)
+  regEnvId.value = null
+  if (!regEnvs.value.length || regEnvsProject.value !== detail.value.project_id) {
+    regEnvs.value = await get(`/wb/api-envs?project_id=${detail.value.project_id}`)
+    regEnvsProject.value = detail.value.project_id
+  }
+  regDlg.value = true
+}
+
+let regEnvsProject = null
+
+async function execBugRegression() {
+  regExecuting.value = true
+  try {
+    const r = await post(`/wb/bugs/${detail.value.id}/regression`, {
+      case_ids: regCaseIds.value, environment_id: regEnvId.value
+    })
+    regDlg.value = false
+    if (r.all_pass) {
+      ElMessage.success('回归验证全部通过，该 Bug 现在允许关闭')
+    } else {
+      ElMessage.warning(`回归未全部通过（${r.summary.fail} 条失败），Bug 状态已流转为「回归失败」`)
+    }
+    detail.value = await get(`/wb/bugs/${detail.value.id}`)
+    load()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally { regExecuting.value = false }
 }
 
 // ---- 添加关联（弹窗式：项目 → 对象级联筛选） ----
@@ -353,4 +434,9 @@ async function removeAtt(a) {
 .att-item { border: 1px solid var(--wb-border); border-radius: 8px; padding: 6px; }
 .att-img { width: 100%; height: 110px; border-radius: 6px; }
 .att-name { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+.reg-cases {
+  max-height: 160px; overflow: auto; font-size: 12px; color: var(--wb-text-sub);
+  background: #f8fafc; border: 1px solid var(--wb-border); border-radius: 6px;
+  padding: 8px 10px; margin-top: 6px; line-height: 1.8;
+}
 </style>

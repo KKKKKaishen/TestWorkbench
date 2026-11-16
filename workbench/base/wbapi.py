@@ -4,7 +4,9 @@
 """
 import json
 import re
+import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
@@ -1818,6 +1820,7 @@ def get_bug(bid: int, db: Session = Depends(get_db)):
             title = pp.name if pp else None
         resolved.append({"id": lk.id, "link_type": lk.link_type, "link_id": lk.link_id, "title": title})
     d["links"] = resolved
+    d["regression_ready"] = _bug_regression_ready(db, b)
     atts = db.query(wb.WbAttachment).filter(
         wb.WbAttachment.owner_type == "bug", wb.WbAttachment.owner_id == bid).all()
     d["attachments"] = [row(a, "id", "file_name", "file_path", "file_size", "mime_type", "uploaded_at") for a in atts]
@@ -1833,6 +1836,10 @@ def update_bug(bid: int, body: BugBody, db: Session = Depends(get_db)):
     d.pop("links", None)
     d.pop("project_id", None)
     if d.get("status") == "closed":
+        # B-04/RG-04：关闭前必须关联用例且存在回归通过记录
+        if not _bug_regression_ready(db, b):
+            raise HTTPException(
+                400, "关闭被拦截：Bug 关联用例尚无回归通过记录，请先发起回归验证并通过（RG-04）")
         b.closed_at = func.now()
     for k, v in d.items():
         setattr(b, k, v)
@@ -1882,6 +1889,598 @@ def lookup_bugs_by_link(link_type: str, link_id: int, db: Session = Depends(get_
         .all()
     )
     return [row(b, "id", "bug_no", "title", "severity", "priority", "status") for b in bugs]
+
+
+# ================= 回归测试管理（RG-01~05） =================
+
+
+def _cron_next(expr: str, base: datetime | None = None) -> datetime:
+    """最小 5 段 cron 解析：分 时 日 月 周。支持 *、*/n、a-b、逗号列表。
+    返回下一次触发时间（本地时间）；一年内无触发点则抛 ValueError。"""
+    fields = expr.split()
+    if len(fields) != 5:
+        raise ValueError("cron 表达式必须为 5 段：分 时 日 月 周（如 0 9 * * 1）")
+
+    def parse_field(f: str, low: int, high: int) -> set:
+        vals = set()
+        for part in f.split(","):
+            part = part.strip()
+            step = 1
+            if "/" in part:
+                part, step_s = part.split("/", 1)
+                step = int(step_s)
+                if step < 1:
+                    raise ValueError(f"cron 步长无效: {f}")
+            if part == "*":
+                rng = list(range(low, high + 1))
+            elif "-" in part:
+                a, b = part.split("-", 1)
+                rng = list(range(int(a), int(b) + 1))
+            else:
+                rng = [int(part)]
+            vals.update(rng[::step])
+        if not vals or any(v < low or v > high for v in vals):
+            raise ValueError(f"cron 字段超出取值范围: {f}")
+        return vals
+
+    minutes = parse_field(fields[0], 0, 59)
+    hours = parse_field(fields[1], 0, 23)
+    days = parse_field(fields[2], 1, 31)
+    months = parse_field(fields[3], 1, 12)
+    # cron 规定周日=0；Python weekday() 周一=0，转换 (wd+1)%7
+    weekdays = {(w) % 7 for w in parse_field(fields[4], 0, 6)}
+    dom_star, dow_star = fields[2] == "*", fields[4] == "*"
+
+    t = (base or datetime.now()) + timedelta(minutes=1)
+    t = t.replace(second=0, microsecond=0)
+    end = t + timedelta(days=366)
+    while t < end:
+        if t.month not in months:
+            # 整月跳过：跳到下月 1 日
+            t = (t.replace(day=1) + timedelta(days=32)).replace(day=1, hour=0, minute=0)
+            continue
+        dom_ok, dow_ok = t.day in days, (t.weekday() + 1) % 7 in weekdays
+        # 标准 cron 语义：日与周仅一个受限→按受限项；两个都受限→任一命中；都为 * → 恒通过
+        if dom_star and not dow_star:
+            day_ok = dow_ok
+        elif dow_star and not dom_star:
+            day_ok = dom_ok
+        elif not dom_star and not dow_star:
+            day_ok = dom_ok or dow_ok
+        else:
+            day_ok = True
+        if not day_ok:
+            t = (t + timedelta(days=1)).replace(hour=0, minute=0)
+            continue
+        if t.hour not in hours:
+            t = (t + timedelta(hours=1)).replace(minute=0)
+            continue
+        if t.minute not in minutes:
+            t += timedelta(minutes=1)
+            continue
+        return t
+    raise ValueError("cron 表达式一年内无触发时间")
+
+
+class RegressionSetBody(BaseModel):
+    project_id: int
+    name: str
+    description: str | None = None
+    case_ids: list[int] = []
+
+
+@router.get("/regression-sets")
+def list_regression_sets(project_id: int, db: Session = Depends(get_db)):
+    sets = (db.query(wb.WbRegressionSet).filter(wb.WbRegressionSet.project_id == project_id)
+            .order_by(wb.WbRegressionSet.id.desc()).all())
+    out = []
+    for s in sets:
+        d = row(s, "id", "project_id", "name", "description", "case_count", "last_run_at", "created_at")
+        # 最近一次执行摘要
+        last = (db.query(wb.WbRegressionRun).filter(wb.WbRegressionRun.set_id == s.id)
+                .order_by(wb.WbRegressionRun.id.desc()).first())
+        d["last_run"] = row(last, "id", "status", "pass_rate", "trigger_type", "finished_at") if last else None
+        # 启用中的定时计划数
+        d["schedule_count"] = db.query(wb.WbRegressionSchedule.id).filter(
+            wb.WbRegressionSchedule.set_id == s.id, wb.WbRegressionSchedule.enabled == 1).count()
+        out.append(d)
+    return out
+
+
+@router.post("/regression-sets")
+def create_regression_set(body: RegressionSetBody, db: Session = Depends(get_db)):
+    if not db.get(wb.WbProject, body.project_id):
+        raise HTTPException(404, "项目不存在")
+    s = wb.WbRegressionSet(project_id=body.project_id, name=body.name, description=body.description)
+    db.add(s)
+    db.flush()
+    added = _add_set_items(db, s, body.case_ids)
+    db.commit()
+    return {"id": s.id, "added": added}
+
+
+def _add_set_items(db: Session, s: wb.WbRegressionSet, case_ids: list[int]) -> int:
+    """向回归集追加用例（校验归属项目、去重），刷新冗余计数。"""
+    existing = {x.case_id for x in db.query(wb.WbRegressionSetItem).filter_by(set_id=s.id).all()}
+    added = 0
+    for cid in case_ids:
+        if cid in existing:
+            continue
+        c = db.get(wb.WbTestCase, cid)
+        if not c or c.project_id != s.project_id:
+            continue
+        db.add(wb.WbRegressionSetItem(set_id=s.id, case_id=cid))
+        existing.add(cid)
+        added += 1
+    db.flush()  # autoflush=False：计数前先落库新增条目，否则冗余计数恒为 0
+    s.case_count = db.query(wb.WbRegressionSetItem).filter_by(set_id=s.id).count()
+    return added
+
+
+@router.get("/regression-sets/{sid}")
+def get_regression_set(sid: int, db: Session = Depends(get_db)):
+    s = db.get(wb.WbRegressionSet, sid)
+    if not s:
+        raise HTTPException(404, "回归集不存在")
+    items = (db.query(wb.WbRegressionSetItem, wb.WbTestCase)
+             .join(wb.WbTestCase, wb.WbRegressionSetItem.case_id == wb.WbTestCase.id)
+             .filter(wb.WbRegressionSetItem.set_id == sid)
+             .order_by(wb.WbTestCase.case_no).all())
+    schedules = (db.query(wb.WbRegressionSchedule).filter(wb.WbRegressionSchedule.set_id == sid)
+                 .order_by(wb.WbRegressionSchedule.id.desc()).all())
+    return {**row(s, "id", "project_id", "name", "description", "case_count", "last_run_at", "created_at"),
+            "cases": [row(c, "id", "case_no", "title", "case_type", "priority", "module_path") for _, c in items],
+            "schedules": [row(x, "id", "name", "cron", "enabled", "environment_id",
+                              "last_run_at", "next_run_at") for x in schedules]}
+
+
+@router.put("/regression-sets/{sid}")
+def update_regression_set(sid: int, body: RegressionSetBody, db: Session = Depends(get_db)):
+    s = db.get(wb.WbRegressionSet, sid)
+    if not s:
+        raise HTTPException(404, "回归集不存在")
+    s.name, s.description = body.name, body.description
+    # 全量替换条目
+    db.query(wb.WbRegressionSetItem).filter_by(set_id=sid).delete(synchronize_session=False)
+    db.flush()
+    _add_set_items(db, s, body.case_ids)
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/regression-sets/{sid}")
+def delete_regression_set(sid: int, db: Session = Depends(get_db)):
+    s = db.get(wb.WbRegressionSet, sid)
+    if not s:
+        raise HTTPException(404, "回归集不存在")
+    # 历史执行记录与定时计划保留（运行记录 set_id 外键不级联），仅删除集合与条目
+    db.query(wb.WbRegressionSetItem).filter_by(set_id=sid).delete(synchronize_session=False)
+    db.query(wb.WbRegressionSchedule).filter_by(set_id=sid).delete(synchronize_session=False)
+    db.delete(s)
+    db.commit()
+    return {"ok": True}
+
+
+class P0SetBody(BaseModel):
+    project_id: int
+    name: str = "P0 核心回归集"
+    description: str | None = None
+
+
+@router.post("/regression-sets/p0")
+def create_p0_regression_set(body: P0SetBody, db: Session = Depends(get_db)):
+    """RG-01：P0 用例一键成集——圈选项目内全部 P0 优先级的启用用例。"""
+    cases = (db.query(wb.WbTestCase)
+             .filter(wb.WbTestCase.project_id == body.project_id,
+                     wb.WbTestCase.priority == "P0", wb.WbTestCase.status == "active").all())
+    if not cases:
+        raise HTTPException(400, "项目内没有 P0 优先级的启用用例")
+    s = wb.WbRegressionSet(project_id=body.project_id, name=body.name,
+                           description=body.description or f"自动圈选 {len(cases)} 条 P0 用例")
+    db.add(s)
+    db.flush()
+    _add_set_items(db, s, [c.id for c in cases])
+    db.commit()
+    return {"id": s.id, "added": s.case_count}
+
+
+# ---------- 回归执行（RG-03/05） ----------
+
+
+def _start_regression_run(db: Session, s: wb.WbRegressionSet, environment_id: int | None,
+                          trigger_type: str):
+    """创建回归执行记录 + 落地执行计划（plan_type=regression，进度汇入执行中心）。"""
+    items = db.query(wb.WbRegressionSetItem).filter_by(set_id=s.id).all()
+    if not items:
+        raise HTTPException(400, f"回归集「{s.name}」为空，请先圈选用例")
+    case_ids = [x.case_id for x in items]
+    plan = wb.WbExecutionPlan(
+        project_id=s.project_id, name=f"回归-{s.name}-{datetime.now().strftime('%m%d %H:%M')}",
+        plan_type="regression", executor="auto" if trigger_type == "scheduled" else "local",
+        total_count=len(case_ids), started_at=func.now(),
+    )
+    db.add(plan)
+    db.flush()
+    for cid in case_ids:
+        db.add(wb.WbExecutionPlanCase(plan_id=plan.id, case_id=cid))
+    run = wb.WbRegressionRun(
+        set_id=s.id, project_id=s.project_id, plan_id=plan.id,
+        trigger_type=trigger_type, status="running", started_at=func.now(),
+    )
+    db.add(run)
+    db.flush()
+    return run, plan
+
+
+def _run_api_case(db: Session, run, case: wb.WbTestCase, environment_id: int | None) -> dict:
+    """单条接口用例自动执行；失败自动重跑一次（RG-05）。返回执行摘要。"""
+    snap = case.api_snapshot or {}
+    kwargs = dict(
+        project_id=run.project_id, environment_id=environment_id,
+        request_id=snap.get("request_id"), method=snap.get("method") or "GET",
+        url=snap.get("url"), headers=snap.get("headers"), query_params=snap.get("params"),
+        body_type=snap.get("body_type"), body=snap.get("body"), auth=snap.get("auth"),
+    )
+    res = _do_send(db, **kwargs)
+    ok = bool(res["status"] and 200 <= res["status"] < 400 and not res["error"])
+    rerun = None
+    if not ok:
+        res2 = _do_send(db, **kwargs)
+        ok2 = bool(res2["status"] and 200 <= res2["status"] < 400 and not res2["error"])
+        rerun = {"status": res2["status"], "error": res2["error"], "duration_ms": res2["duration_ms"]}
+        if ok2:
+            res, ok = res2, True
+    return {"res": res, "ok": ok, "rerun": rerun}
+
+
+def _execute_regression(db: Session, run: wb.WbRegressionRun, plan: wb.WbExecutionPlan,
+                        s: wb.WbRegressionSet, environment_id: int | None) -> list[dict]:
+    """RG-03：回归执行引擎。接口用例自动执行（失败自动重跑一次，RG-05）；
+    功能用例保持待执行（进入执行中心人工标记）；结果写执行历史。"""
+    rows = (db.query(wb.WbExecutionPlanCase, wb.WbTestCase)
+            .join(wb.WbTestCase, wb.WbExecutionPlanCase.case_id == wb.WbTestCase.id)
+            .filter(wb.WbExecutionPlanCase.plan_id == plan.id)
+            .order_by(wb.WbExecutionPlanCase.id).all())
+    auto_results = []
+    for pc, case in rows:
+        snap = case.api_snapshot or {}
+        if case.case_type != "api" or not snap.get("url"):
+            continue  # 功能用例：留待人工执行（plan_case 保持 pending）
+        try:
+            r = _run_api_case(db, run, case, environment_id)
+        except Exception as ex:
+            pc.result, pc.note, pc.executed_at, pc.executor = "fail", f"执行异常：{ex}", func.now(), "auto"
+            db.add(wb.WbExecutionRecord(plan_case_id=pc.id, case_id=pc.case_id,
+                                        actual_result=f"执行异常：{ex}", executed_at=func.now()))
+            auto_results.append({"case_id": case.id, "case_no": case.case_no, "title": case.title,
+                                 "result": "fail", "error": str(ex)})
+            continue
+        res, ok, rerun = r["res"], r["ok"], r["rerun"]
+        pc.result = "pass" if ok else "fail"
+        pc.executor = "auto"
+        pc.executed_at = func.now()
+        if rerun and ok:
+            pc.note = "首次失败已自动重跑通过（RG-05）"
+        elif rerun:
+            pc.note = "失败（已自动重跑一次仍未通过，RG-05）"
+        else:
+            pc.note = "回归自动执行"
+        db.add(wb.WbExecutionRecord(
+            plan_case_id=pc.id, case_id=pc.case_id,
+            actual_result=f"HTTP {res['status']} · {res['duration_ms']}ms"
+                          + (f" · {res['error']}" if res["error"] else ""),
+            step_results=[{"status": res["status"], "duration_ms": res["duration_ms"],
+                           "error": res["error"], "history_id": res["history_id"],
+                           "rerun": rerun}],
+            duration_ms=res["duration_ms"], executed_at=func.now(),
+        ))
+        if not ok:
+            # RG-05：重跑仍失败 → 生成测试日志（回归域），便于追溯与关联 Bug
+            db.add(wb.WbTestLog(
+                project_id=run.project_id, plan_id=plan.id, log_type="regression",
+                title=f"回归失败：{case.case_no} {case.title}",
+                content=json.dumps({
+                    "run_id": run.id, "plan_id": plan.id, "set_id": s.id,
+                    "case_id": case.id, "case_no": case.case_no, "title": case.title,
+                    "status": res["status"], "duration_ms": res["duration_ms"],
+                    "error": res["error"], "rerun": rerun, "url": res.get("url"),
+                }, ensure_ascii=False),
+            ))
+        auto_results.append({
+            "case_id": case.id, "case_no": case.case_no, "title": case.title,
+            "result": "pass" if ok else "fail", "status": res["status"],
+            "duration_ms": res["duration_ms"], "error": res["error"], "rerun": rerun,
+        })
+    db.flush()
+    _recount_plan(db, plan.id)
+    _sync_regression_run(db, run)
+    db.commit()
+    return auto_results
+
+
+def _sync_regression_run(db: Session, run: wb.WbRegressionRun):
+    """由落地计划实时推导回归记录状态/通过率（人工补执行后自动完结）。"""
+    p = db.get(wb.WbExecutionPlan, run.plan_id) if run.plan_id else None
+    if not p:
+        return
+    if p.status == "completed" and run.status != "completed":
+        run.status = "completed"
+        # 注意：p.finished_at 可能是 func.now() SQL 表达式（_recount_plan 刚赋值未 flush），
+        # 不能对其做布尔/比较运算，这里统一取当前时间
+        run.finished_at = func.now()
+        if p.total_count:
+            run.pass_rate = round(p.pass_count / p.total_count * 100, 2)
+        s = db.get(wb.WbRegressionSet, run.set_id)
+        if s:
+            s.last_run_at = run.finished_at
+    elif p.status in ("running", "aborted") and run.status == "completed":
+        run.status, run.finished_at = "running", None
+
+
+class RegressionRunBody(BaseModel):
+    set_id: int
+    environment_id: int | None = None
+    trigger_type: str = "manual"  # manual / scheduled
+
+
+@router.post("/regression-runs")
+def trigger_regression(body: RegressionRunBody, db: Session = Depends(get_db)):
+    """RG-02/03：手动触发回归执行。"""
+    if body.trigger_type not in ("manual", "scheduled"):
+        raise HTTPException(400, "非法触发方式")
+    s = db.get(wb.WbRegressionSet, body.set_id)
+    if not s:
+        raise HTTPException(404, "回归集不存在")
+    run, plan = _start_regression_run(db, s, body.environment_id, body.trigger_type)
+    auto_results = _execute_regression(db, run, plan, s, body.environment_id)
+    pending = (db.query(wb.WbExecutionPlanCase).filter(
+        wb.WbExecutionPlanCase.plan_id == plan.id, wb.WbExecutionPlanCase.result == "pending").count())
+    return {"run_id": run.id, "plan_id": plan.id, "auto_results": auto_results,
+            "pending_count": pending,
+            "summary": {"total": plan.total_count, "pass": plan.pass_count,
+                        "fail": plan.fail_count, "status": plan.status}}
+
+
+@router.get("/regression-runs")
+def list_regression_runs(project_id: int | None = None, set_id: int | None = None,
+                         db: Session = Depends(get_db)):
+    q = db.query(wb.WbRegressionRun)
+    if project_id:
+        q = q.filter(wb.WbRegressionRun.project_id == project_id)
+    if set_id:
+        q = q.filter(wb.WbRegressionRun.set_id == set_id)
+    runs = q.order_by(wb.WbRegressionRun.id.desc()).limit(200).all()
+    sname = {s.id: s.name for s in db.query(wb.WbRegressionSet).all()}
+    out = []
+    for r in runs:
+        _sync_regression_run(db, r)
+        p = db.get(wb.WbExecutionPlan, r.plan_id) if r.plan_id else None
+        d = row(r, "id", "set_id", "project_id", "plan_id", "trigger_type", "status",
+                "pass_rate", "started_at", "finished_at")
+        d["set_name"] = sname.get(r.set_id, "")
+        if p:
+            d.update({"plan_name": p.name, "total_count": p.total_count, "pass_count": p.pass_count,
+                      "fail_count": p.fail_count, "pending_count": p.total_count - p.pass_count - p.fail_count
+                      - p.block_count - p.skip_count, "plan_status": p.status})
+        else:
+            d.update({"plan_name": "", "total_count": 0, "pass_count": 0, "fail_count": 0,
+                      "pending_count": 0, "plan_status": ""})
+        out.append(d)
+    if runs:
+        db.commit()
+    return out
+
+
+@router.delete("/regression-runs/{rid}")
+def delete_regression_run(rid: int, db: Session = Depends(get_db)):
+    r = db.get(wb.WbRegressionRun, rid)
+    if not r:
+        raise HTTPException(404, "回归记录不存在")
+    db.delete(r)  # 关联的执行计划保留在执行中心历史中
+    db.commit()
+    return {"ok": True}
+
+
+# ---------- 定时计划（RG-02） ----------
+
+
+class ScheduleBody(BaseModel):
+    set_id: int
+    name: str | None = None
+    cron: str
+    environment_id: int | None = None
+    enabled: int = 1
+
+
+@router.get("/regression-schedules")
+def list_regression_schedules(project_id: int, db: Session = Depends(get_db)):
+    rows = (db.query(wb.WbRegressionSchedule).filter(wb.WbRegressionSchedule.project_id == project_id)
+            .order_by(wb.WbRegressionSchedule.id.desc()).all())
+    sname = {s.id: s.name for s in db.query(wb.WbRegressionSet).all()}
+    ename = {e.id: e.name for e in db.query(wb.WbApiEnvironment).filter(
+        wb.WbApiEnvironment.project_id == project_id).all()}
+    return [{**row(x, "id", "set_id", "project_id", "name", "cron", "environment_id", "enabled",
+                   "last_run_at", "next_run_at", "created_at"),
+             "set_name": sname.get(x.set_id, ""),
+             "environment_name": ename.get(x.environment_id, "默认环境")} for x in rows]
+
+
+@router.post("/regression-schedules")
+def create_regression_schedule(body: ScheduleBody, db: Session = Depends(get_db)):
+    s = db.get(wb.WbRegressionSet, body.set_id)
+    if not s:
+        raise HTTPException(404, "回归集不存在")
+    try:
+        nxt = _cron_next(body.cron)
+    except ValueError as ex:
+        raise HTTPException(400, f"cron 表达式无效：{ex}")
+    sch = wb.WbRegressionSchedule(
+        set_id=s.id, project_id=s.project_id,
+        name=body.name or f"{s.name}·定时回归", cron=body.cron.strip(),
+        environment_id=body.environment_id, enabled=1 if body.enabled else 0, next_run_at=nxt,
+    )
+    db.add(sch)
+    db.commit()
+    return {"id": sch.id, "next_run_at": str(nxt)}
+
+
+@router.put("/regression-schedules/{schid}")
+def update_regression_schedule(schid: int, body: ScheduleBody, db: Session = Depends(get_db)):
+    sch = db.get(wb.WbRegressionSchedule, schid)
+    if not sch:
+        raise HTTPException(404, "定时计划不存在")
+    sch.cron = body.cron.strip()
+    sch.environment_id = body.environment_id
+    sch.enabled = 1 if body.enabled else 0
+    if body.name:
+        sch.name = body.name
+    try:
+        sch.next_run_at = _cron_next(sch.cron)
+    except ValueError as ex:
+        raise HTTPException(400, f"cron 表达式无效：{ex}")
+    db.commit()
+    return {"ok": True, "next_run_at": str(sch.next_run_at)}
+
+
+@router.post("/regression-schedules/{schid}/toggle")
+def toggle_regression_schedule(schid: int, db: Session = Depends(get_db)):
+    sch = db.get(wb.WbRegressionSchedule, schid)
+    if not sch:
+        raise HTTPException(404, "定时计划不存在")
+    sch.enabled = 0 if sch.enabled else 1
+    if sch.enabled:
+        sch.next_run_at = _cron_next(sch.cron)
+    db.commit()
+    return {"ok": True, "enabled": sch.enabled}
+
+
+@router.post("/regression-schedules/{schid}/run-now")
+def run_schedule_now(schid: int, db: Session = Depends(get_db)):
+    sch = db.get(wb.WbRegressionSchedule, schid)
+    if not sch:
+        raise HTTPException(404, "定时计划不存在")
+    s = db.get(wb.WbRegressionSet, sch.set_id)
+    if not s:
+        raise HTTPException(404, "回归集不存在")
+    run, plan = _start_regression_run(db, s, sch.environment_id, "manual")
+    auto_results = _execute_regression(db, run, plan, s, sch.environment_id)
+    return {"run_id": run.id, "plan_id": plan.id, "auto_results": auto_results}
+
+
+@router.delete("/regression-schedules/{schid}")
+def delete_regression_schedule(schid: int, db: Session = Depends(get_db)):
+    sch = db.get(wb.WbRegressionSchedule, schid)
+    if not sch:
+        raise HTTPException(404, "定时计划不存在")
+    db.delete(sch)
+    db.commit()
+    return {"ok": True}
+
+
+_scheduler_started = False
+
+
+def start_regression_scheduler():
+    """启动回归调度线程（main.py lifespan 调用，幂等）。每 30s 扫描到期的定时计划触发回归。"""
+    global _scheduler_started
+    if _scheduler_started:
+        return
+    _scheduler_started = True
+
+    def _loop():
+        from models.database import create_session
+        while True:
+            time.sleep(30)
+            db = None
+            try:
+                db = create_session()
+                now = datetime.now()
+                due = (db.query(wb.WbRegressionSchedule)
+                       .filter(wb.WbRegressionSchedule.enabled == 1,
+                               wb.WbRegressionSchedule.next_run_at != None,  # noqa: E711
+                               wb.WbRegressionSchedule.next_run_at <= now).all())
+                for sch in due:
+                    try:
+                        s = db.get(wb.WbRegressionSet, sch.set_id)
+                        if s:
+                            run, plan = _start_regression_run(db, s, sch.environment_id, "scheduled")
+                            _execute_regression(db, run, plan, s, sch.environment_id)
+                        sch.last_run_at = datetime.now()
+                        sch.next_run_at = _cron_next(sch.cron)
+                        db.commit()
+                    except Exception as ex:
+                        db.rollback()
+                        print(f"[regression-scheduler] 计划 {sch.id} 触发失败: {ex}")
+            except Exception as ex:
+                print(f"[regression-scheduler] 调度循环异常: {ex}")
+            finally:
+                if db:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+
+    threading.Thread(target=_loop, daemon=True, name="regression-scheduler").start()
+
+
+class BugRegressionBody(BaseModel):
+    case_ids: list[int] = []  # 空 = 使用 Bug 关联用例
+    environment_id: int | None = None
+
+
+@router.post("/bugs/{bid}/regression")
+def bug_regression(bid: int, body: BugRegressionBody, db: Session = Depends(get_db)):
+    """RG-04：Bug 定向回归——「已修复」后对关联用例（或指定用例）发起回归验证。"""
+    b = db.get(wb.WbBug, bid)
+    if not b:
+        raise HTTPException(404, "Bug 不存在")
+    case_ids = body.case_ids or [lk.link_id for lk in
+                                 db.query(wb.WbBugLink).filter_by(bug_id=bid, link_type="case").all()]
+    if not case_ids:
+        raise HTTPException(400, "Bug 未关联用例，请先在详情中关联用例后再发起回归验证")
+    # get-or-create 定向回归集，条目与本次用例对齐
+    s = (db.query(wb.WbRegressionSet)
+         .filter(wb.WbRegressionSet.project_id == b.project_id,
+                 wb.WbRegressionSet.name == f"定向回归-{b.bug_no}").first())
+    if not s:
+        s = wb.WbRegressionSet(project_id=b.project_id, name=f"定向回归-{b.bug_no}",
+                               description=f"Bug {b.bug_no} 定向回归用例集")
+        db.add(s)
+        db.flush()
+    else:
+        db.query(wb.WbRegressionSetItem).filter_by(set_id=s.id).delete(synchronize_session=False)
+        db.flush()
+    _add_set_items(db, s, case_ids)
+    db.commit()
+    run, plan = _start_regression_run(db, s, body.environment_id, "manual")
+    auto_results = _execute_regression(db, run, plan, s, body.environment_id)
+    pending = (db.query(wb.WbExecutionPlanCase).filter(
+        wb.WbExecutionPlanCase.plan_id == plan.id, wb.WbExecutionPlanCase.result == "pending").count())
+    all_pass = plan.status == "completed" and plan.fail_count == 0 and pending == 0
+    if not all_pass and plan.fail_count > 0 and b.status == "fixed":
+        b.status = "regressed"  # 回归失败：流转为「回归失败」
+        db.commit()
+    return {"run_id": run.id, "plan_id": plan.id, "set_id": s.id, "auto_results": auto_results,
+            "pending_count": pending, "all_pass": all_pass,
+            "bug_status": b.status,
+            "summary": {"total": plan.total_count, "pass": plan.pass_count, "fail": plan.fail_count}}
+
+
+def _bug_regression_ready(db: Session, b: wb.WbBug) -> bool:
+    """B-04/RG-04 关闭卡点判定：每个关联用例都存在回归执行中通过的记录。"""
+    case_ids = [lk.link_id for lk in
+                db.query(wb.WbBugLink).filter_by(bug_id=b.id, link_type="case").all()]
+    if not case_ids:
+        return False
+    passed = {r[0] for r in (
+        db.query(wb.WbExecutionPlanCase.case_id)
+        .join(wb.WbRegressionRun, wb.WbRegressionRun.plan_id == wb.WbExecutionPlanCase.plan_id)
+        .join(wb.WbExecutionPlan, wb.WbExecutionPlan.id == wb.WbRegressionRun.plan_id)
+        .filter(wb.WbRegressionRun.project_id == b.project_id,
+                wb.WbExecutionPlan.plan_type == "regression",
+                wb.WbExecutionPlanCase.case_id.in_(case_ids),
+                wb.WbExecutionPlanCase.result == "pass").all())}
+    return all(cid in passed for cid in case_ids)
 
 
 # ================= 附件 =================

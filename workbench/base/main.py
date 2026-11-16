@@ -43,6 +43,9 @@ async def lifespan(app: FastAPI):
     test_run_service.reset_stale_running()
     # 存量执行结果快照可能含明文凭据（写侧脱敏上线前落库），启动时幂等清洗
     test_run_service.redact_stored_request_headers()
+    # RG-02：回归定时调度线程（每 30s 扫描到期计划，daemon 不阻塞退出）
+    from wbapi import start_regression_scheduler
+    start_regression_scheduler()
     yield
 
 

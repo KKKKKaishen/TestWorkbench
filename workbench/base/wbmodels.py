@@ -325,6 +325,21 @@ class WbRegressionRun(Base):
     __table_args__ = (Index("idx_rrun_project_time", "project_id", "started_at"),)
 
 
+class WbRegressionSchedule(Base):
+    """回归定时计划：按 cron 表达式定时触发回归集执行（调度线程每 30s 扫描）。"""
+    __tablename__ = "wb_regression_schedules"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    set_id = Column(BigInteger, ForeignKey("wb_regression_sets.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id = Column(BigInteger, nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    cron = Column(String(50), nullable=False)  # 5 段 cron：分 时 日 月 周
+    environment_id = Column(BigInteger)  # 执行环境（空 = 用默认环境）
+    enabled = Column(Integer, nullable=False, default=1)
+    last_run_at = Column(DateTime)
+    next_run_at = Column(DateTime)  # 调度线程据此判断是否触发
+    created_at = Column(DateTime, default=func.now())
+
+
 class WbReport(Base):
     __tablename__ = "wb_reports"
     id = Column(BigInteger, primary_key=True, autoincrement=True)

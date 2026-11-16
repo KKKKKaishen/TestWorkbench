@@ -309,6 +309,23 @@ CREATE TABLE wb_regression_runs (
   CONSTRAINT fk_rrun_plan FOREIGN KEY (plan_id) REFERENCES wb_execution_plans(id) ON DELETE SET NULL
 ) COMMENT '回归执行记录（Bug 关闭卡点：需存在关联的回归通过记录）';
 
+CREATE TABLE wb_regression_schedules (
+  id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增ID',
+  set_id        BIGINT UNSIGNED NOT NULL COMMENT '回归集ID（外键 wb_regression_sets）',
+  project_id    BIGINT UNSIGNED NOT NULL COMMENT '所属项目ID（冗余，便于按项目查询）',
+  name          VARCHAR(200) NOT NULL COMMENT '计划名称（如 每晚核心回归）',
+  cron          VARCHAR(50)  NOT NULL COMMENT '5 段 cron 表达式：分 时 日 月 周',
+  environment_id BIGINT UNSIGNED NULL COMMENT '执行环境ID（空 = 用默认环境）',
+  enabled       TINYINT      NOT NULL DEFAULT 1 COMMENT '是否启用：1=启用，0=停用',
+  last_run_at   DATETIME     NULL COMMENT '最近一次触发时间',
+  next_run_at   DATETIME     NULL COMMENT '下次触发时间（调度线程据此判断）',
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  KEY idx_rsch_set (set_id),
+  KEY idx_rsch_project (project_id),
+  KEY idx_rsch_next (enabled, next_run_at),
+  CONSTRAINT fk_rsch_set FOREIGN KEY (set_id) REFERENCES wb_regression_sets(id) ON DELETE CASCADE
+) COMMENT '回归定时计划（RG-02：cron 定时触发回归集执行）';
+
 -- =========================================================
 -- 9. 报告 / 设置 / AI 观测
 -- =========================================================

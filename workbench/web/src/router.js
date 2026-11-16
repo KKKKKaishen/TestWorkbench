@@ -8,7 +8,7 @@ import ApiTest from './pages/ApiTest.vue'
 import AutoTest from './pages/Placeholder.vue'
 import Bugs from './pages/Bugs.vue'
 import Logs from './pages/Logs.vue'
-import Regression from './pages/Placeholder.vue'
+import Regression from './pages/Regression.vue'
 import Reports from './pages/Reports.vue'
 import Knowledge from './pages/Knowledge.vue'
 import Settings from './pages/Settings.vue'
@@ -24,7 +24,7 @@ export const routes = [
   { path: '/exec/auto', component: AutoTest, meta: { title: '自动化测试', building: true } },
   { path: '/bugs', component: Bugs, meta: { title: 'Bug 管理' } },
   { path: '/logs', component: Logs, meta: { title: '日志管理' } },
-  { path: '/regression', component: Regression, meta: { title: '回归测试', building: true } },
+  { path: '/regression', component: Regression, meta: { title: '回归测试' } },
   { path: '/reports', component: Reports, meta: { title: '测试报告' } },
   { path: '/knowledge', component: Knowledge, meta: { title: '知识库' } },
   { path: '/settings', component: Settings, meta: { title: '设置' } }
