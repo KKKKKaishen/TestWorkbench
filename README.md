@@ -73,8 +73,12 @@ npm run build        # 产物输出到 dist/，由后端静态托管
 ```bash
 cd workbench/pack-test
 pyinstaller TestWorkbenchShell.spec
-# 产物在 dist/ 下
+# 产物在 dist/TestWorkbenchShell/（含 TestWorkbenchShell.exe 与 _internal 运行时）
 ```
+
+> **不想打包？** 直接到仓库 [Releases](https://github.com/KKKKKaishen/TestWorkbench/releases) 页下载已打包好的
+> `TestWorkbenchShell-vX.X.X-win64.zip`，解压后运行 `TestWorkbenchShell.exe` 即可。
+> 注意 exe 为 --onedir 模式，`_internal` 文件夹必须与 exe 放在一起。
 
 ## 日常开发
 
