@@ -15,6 +15,7 @@
       </el-select>
       <el-button plain size="small" @click="envDlg = true"><el-icon><Setting /></el-icon>管理环境</el-button>
       <div style="flex: 1" />
+      <el-button plain size="small" @click="openImportDlg"><el-icon><Upload /></el-icon>导入 OpenAPI</el-button>
       <el-button plain size="small" @click="openColDlg"><el-icon><FolderAdd /></el-icon>新建集合</el-button>
       <el-button type="primary" size="small" @click="newApi()"><el-icon><Plus /></el-icon>新建接口</el-button>
     </div>
@@ -283,6 +284,29 @@
         </div>
       </template>
       <el-empty v-else description="选择或新建一个环境开始配置" :image-size="70" />
+    </el-dialog>
+
+    <!-- 导入 OpenAPI 弹窗 -->
+    <el-dialog v-model="importDlg" title="导入 OpenAPI / Swagger" width="620px" top="6vh">
+      <el-alert
+        type="info" :closable="false" style="margin-bottom: 10px"
+        title="支持 OpenAPI 3.x / Swagger 2.0 的 JSON 或 YAML 文档；解析 paths 生成接口集合，Query 参数与 JSON 请求体示例一并带入"
+      />
+      <el-upload
+        :auto-upload="false" :show-file-list="false" accept=".json,.yaml,.yml,.txt"
+        @change="onImportFile"
+      >
+        <el-button size="small"><el-icon><Upload /></el-icon>选择文件</el-button>
+        <span class="muted" style="margin-left: 10px; font-size: 12px">或直接在下方粘贴文档内容</span>
+      </el-upload>
+      <el-input
+        v-model="importContent" type="textarea" :rows="12" class="mono"
+        placeholder='粘贴 OpenAPI 文档内容，如 {"openapi": "3.0.0", "info": {...}, "paths": {...}}' style="margin-top: 10px"
+      />
+      <template #footer>
+        <el-button @click="importDlg = false">取消</el-button>
+        <el-button type="primary" :loading="importing" @click="doImport">导 入</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -572,6 +596,38 @@ async function doCreateCol() {
   await post('/wb/api-collections', { project_id: projectId.value, name: colName.value, parent_id: colParent.value || null })
   colDlg.value = false
   loadCollections()
+}
+
+// ---------- OpenAPI 导入（EX-A3） ----------
+const importDlg = ref(false)
+const importContent = ref('')
+const importing = ref(false)
+
+function openImportDlg() {
+  importContent.value = ''
+  importDlg.value = true
+}
+
+function onImportFile(uploadFile) {
+  const f = uploadFile.raw || uploadFile.file || uploadFile
+  const reader = new FileReader()
+  reader.onload = () => { importContent.value = String(reader.result || '') }
+  reader.readAsText(f)
+}
+
+async function doImport() {
+  if (!importContent.value.trim()) return ElMessage.warning('请先粘贴或选择文档内容')
+  importing.value = true
+  try {
+    const r = await post('/wb/api-import-openapi', { project_id: projectId.value, content: importContent.value })
+    ElMessage.success(`导入成功：「${r.collection_name}」共 ${r.imported} 个接口` + (r.skipped ? `，跳过 ${r.skipped} 个` : '') + (r.base_url ? `，Base URL：${r.base_url}` : ''))
+    importDlg.value = false
+    loadCollections()
+  } catch (e) {
+    ElMessage.error('导入失败：' + e.message)
+  } finally {
+    importing.value = false
+  }
 }
 
 async function colCmd(cmd, col) {

@@ -497,6 +497,84 @@ def _apply_extracts(extracts, res):
     return out
 
 
+def _eval_assertions(assertions, res):
+    """EX-A3 断言判定：[{type: status|json_path|response_time, op, value, path}] → [{passed, desc}]。"""
+    out = []
+    parsed = None
+    body_parsed = False
+    for a in (assertions or []):
+        if not isinstance(a, dict):
+            continue
+        t = a.get("type") or "status"
+        op = a.get("op") or "=="
+        val = a.get("value")
+        if t == "status":
+            actual = res.get("status")
+        elif t == "response_time":
+            actual = res.get("duration_ms")
+        else:  # json_path
+            if not body_parsed:
+                try:
+                    parsed = json.loads(res.get("body") or "")
+                except Exception:
+                    parsed = None
+                body_parsed = True
+            actual = _json_path_get(parsed, a.get("path")) if parsed is not None else None
+
+        if op == "not_null":
+            passed = actual is not None and actual != ""
+        elif op == "contains":
+            passed = val is not None and str(val) in str(actual if actual is not None else "")
+        else:
+            try:
+                an, vn = float(actual), float(val)
+            except (TypeError, ValueError):
+                an = vn = None
+            if op == "==":
+                passed = (an == vn) if an is not None else (str(actual) == str(val))
+            elif op == "!=":
+                passed = (an != vn) if an is not None else (str(actual) != str(val))
+            elif op == ">=":
+                passed = an is not None and vn is not None and an >= vn
+            elif op == "<=":
+                passed = an is not None and vn is not None and an <= vn
+            elif op == ">":
+                passed = an is not None and vn is not None and an > vn
+            elif op == "<":
+                passed = an is not None and vn is not None and an < vn
+            else:
+                passed = False
+        type_name = {"status": "状态码", "response_time": "响应耗时(ms)", "json_path": "字段"}.get(t, t)
+        where = f"[{a.get('path')}]" if t == "json_path" else ""
+        out.append({
+            "passed": bool(passed),
+            "desc": f"{type_name}{where} {op} {val if val is not None else ''}（实际: {actual if actual is not None else '无'}）",
+        })
+    return out
+
+
+def _schema_example(schema, depth=0):
+    """从 JSON Schema 粗略生成示例值（导入 OpenAPI 时填充请求体示例）。"""
+    if not isinstance(schema, dict) or depth > 6:
+        return None
+    if "example" in schema:
+        return schema["example"]
+    if "default" in schema:
+        return schema["default"]
+    t = schema.get("type") or ("object" if schema.get("properties") else None)
+    if t == "object":
+        props = schema.get("properties") or {}
+        return {k: _schema_example(v, depth + 1) for k, v in props.items()} if props else {}
+    if t == "array":
+        item = _schema_example(schema.get("items") or {}, depth + 1)
+        return [item] if item is not None else []
+    if t in ("integer", "number"):
+        return 0
+    if t == "boolean":
+        return True
+    return ""
+
+
 # ---- 环境变量 ----
 class EnvBody(BaseModel):
     project_id: int
@@ -643,6 +721,91 @@ def create_api_request(body: ApiRequestBody, db: Session = Depends(get_db)):
     db.add(r)
     db.commit()
     return {"id": r.id}
+
+
+@router.post("/api-import-openapi")
+def import_openapi(body: dict, db: Session = Depends(get_db)):
+    """EX-A3：导入 OpenAPI/Swagger 文档（JSON/YAML），按 paths 生成接口集合与接口定义。"""
+    project_id = body.get("project_id")
+    if not project_id:
+        raise HTTPException(400, "缺少 project_id")
+    content = body.get("content") or ""
+    if not content.strip():
+        raise HTTPException(400, "文档内容为空")
+    try:
+        spec = json.loads(content)
+    except Exception:
+        try:
+            import yaml
+            spec = yaml.safe_load(content)
+        except Exception:
+            raise HTTPException(400, "内容不是合法的 JSON/YAML")
+    if not isinstance(spec, dict) or "paths" not in spec:
+        raise HTTPException(400, "未找到 paths 节点，请确认是 OpenAPI/Swagger 文档")
+
+    info = spec.get("info") or {}
+    title = (str(info.get("title") or "导入接口集") or "导入接口集").strip()[:100]
+    base_url = ""
+    servers = spec.get("servers") or []
+    if servers and isinstance(servers[0], dict):
+        base_url = str(servers[0].get("url") or "").rstrip("/")
+    if not base_url and spec.get("host"):  # Swagger 2.0
+        scheme = (spec.get("schemes") or ["https"])[0]
+        base_url = f"{scheme}://{spec['host']}{spec.get('basePath') or ''}".rstrip("/")
+
+    col = wb.WbApiCollection(project_id=project_id, name=title, parent_id=body.get("collection_id"))
+    db.add(col)
+    db.flush()
+
+    count = skipped = 0
+    for path, methods in (spec.get("paths") or {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for m, op in methods.items():
+            m = str(m).lower()
+            if m not in ("get", "post", "put", "delete", "patch") or not isinstance(op, dict):
+                continue
+            summary = str(op.get("summary") or op.get("operationId") or f"{m.upper()} {path}").strip()
+            params = []
+            body_type, body = "none", None
+            for p in (op.get("parameters") or []):
+                if not isinstance(p, dict) or not p.get("name"):
+                    continue
+                if p.get("in") == "query":
+                    params.append({"key": p["name"], "value": "", "type": p.get("type") or "string",
+                                   "desc": (p.get("description") or "")[:200]})
+                elif p.get("in") == "body" and p.get("schema"):  # Swagger 2.0
+                    body_type = "json"
+                    body = json.dumps(_schema_example(p["schema"]), ensure_ascii=False)
+                elif p.get("in") == "formData":
+                    if body_type == "none":
+                        body_type = "form"
+            rb = ((op.get("requestBody") or {}).get("content") or {})  # OpenAPI 3.x
+            jc = rb.get("application/json")
+            if jc is not None and isinstance(jc, dict):
+                body_type = "json"
+                example = jc.get("example") if jc.get("example") is not None else _schema_example(jc.get("schema"))
+                try:
+                    body = json.dumps(example, ensure_ascii=False)
+                except Exception:
+                    body = None
+            url = (base_url + path) if base_url else path
+            if len(url) > 480:
+                skipped += 1
+                continue
+            db.add(wb.WbApiRequest(
+                project_id=project_id, collection_id=col.id,
+                name=summary[:190], method=m.upper(), url=url,
+                params=params or None, body_type=body_type, body=body,
+                description=(str(op.get("description") or "") or None),
+            ))
+            count += 1
+    if count == 0:
+        db.rollback()
+        raise HTTPException(400, "文档中没有可导入的接口（仅支持 GET/POST/PUT/DELETE/PATCH）")
+    db.commit()
+    return {"ok": True, "collection_id": col.id, "collection_name": title,
+            "imported": count, "skipped": skipped, "base_url": base_url}
 
 
 @router.get("/api-requests/{rid}")
@@ -1132,6 +1295,8 @@ def update_scenario_step(sid: int, step_id: int, body: dict, db: Session = Depen
             "auth": snap.get("auth"),
             "extracts": [e for e in (snap.get("extracts") or [])
                          if isinstance(e, dict) and (e.get("name") or "").strip()],
+            "assertions": [a for a in (snap.get("assertions") or [])
+                           if isinstance(a, dict) and (a.get("type") or "status")],
         }
     db.commit()
     return {"ok": True}
@@ -1198,15 +1363,23 @@ def run_api_scenario(sid: int, db: Session = Depends(get_db)):
             extracted = _apply_extracts(snap.get("extracts"), res)
             if extracted:
                 run_vars.update(extracted)
+            # EX-A3：断言判定（状态码 / JSON 字段 / 响应耗时）
+            assertion_results = _eval_assertions(snap.get("assertions"), res)
             results.append({
                 "step_id": st.id, "name": name, "method": method, "url": res["url"],
                 "status": res["status"], "duration_ms": res["duration_ms"],
                 "size": res["size"], "error": res["error"], "loop": loop,
                 "history_id": res["history_id"],
                 "extracted": extracted,
+                "assertions": assertion_results,
             })
     total_ms = int((time.perf_counter() - t0) * 1000)
-    ok_count = sum(1 for x in results if x["status"] and 200 <= x["status"] < 400 and not x["error"])
+    # 通过 = HTTP 成功 且 无异常 且 全部断言通过（无断言时仅看 HTTP）
+    ok_count = sum(
+        1 for x in results
+        if x.get("status") and 200 <= x["status"] < 400 and not x.get("error")
+        and all(a["passed"] for a in (x.get("assertions") or []))
+    )
     s.last_run_at = func.now()
     db.commit()
     return {"total": len(results), "passed": ok_count,

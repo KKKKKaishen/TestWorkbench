@@ -126,6 +126,15 @@
                   >
                     <el-icon><Right /></el-icon>{{ Object.keys(st.result.extracted).join(', ') }}
                   </span>
+                  <el-tooltip
+                    v-if="st.result.assertions && st.result.assertions.length"
+                    placement="top"
+                    :content="st.result.assertions.map(a => a.desc).join('\n')"
+                  >
+                    <el-tag size="small" :type="st.result.assertions.every(a => a.passed) ? 'success' : 'danger'" effect="plain">
+                      断言 {{ st.result.assertions.filter(a => a.passed).length }}/{{ st.result.assertions.length }}
+                    </el-tag>
+                  </el-tooltip>
                 </template>
                 <el-icon class="req-del" @click.stop="removeStep(st)"><Delete /></el-icon>
               </div>
@@ -224,6 +233,32 @@
                     </div>
                   </div>
                   <div class="extract-tip muted">运行流程时按本步骤响应提取变量并下传后续步骤，后续步骤以 <b>{{ '\{\{变量名\}\}' }}</b> 引用；提取值跨循环保留（如登录 token 只提取一次）。</div>
+                </el-tab-pane>
+                <el-tab-pane name="asserts">
+                  <template #label>断言<span v-if="assertCount" class="tab-badge">{{ assertCount }}</span></template>
+                  <div class="kv-table">
+                    <div class="kv-head muted"><span class="c-src">对象</span><span class="c-op2">比较</span><span class="c-key">期望值</span><span class="c-val">字段路径</span><span class="c-op"></span></div>
+                    <div v-for="(a, ai) in stepForm.assertions" :key="ai" class="kv-row">
+                      <el-select v-model="a.type" class="c-src" @change="a.op = a.type === 'status' ? '==' : (a.type === 'response_time' ? '<=' : '==')">
+                        <el-option value="status" label="状态码" />
+                        <el-option value="json_path" label="JSON 字段" />
+                        <el-option value="response_time" label="响应耗时" />
+                      </el-select>
+                      <el-select v-model="a.op" class="c-op2">
+                        <el-option v-for="o in ['==', '!=', '>', '>=', '<', '<=', 'contains', 'not_null']" :key="o" :value="o" :label="o" />
+                      </el-select>
+                      <el-input v-model="a.value" placeholder="期望值" class="c-key mono" :disabled="a.op === 'not_null'" />
+                      <el-input
+                        v-model="a.path" class="c-val mono" :disabled="a.type !== 'json_path'"
+                        :placeholder="a.type === 'json_path' ? '点路径，如 data.code' : '—'"
+                      />
+                      <el-icon class="kv-del" @click="stepForm.assertions.splice(ai, 1)"><Delete /></el-icon>
+                    </div>
+                    <div class="kv-add" role="button" @click="stepForm.assertions.push({ type: 'status', op: '==', value: '200', path: '' })">
+                      <el-icon><Plus /></el-icon>添加断言
+                    </div>
+                  </div>
+                  <div class="extract-tip muted">运行流程时逐条判定断言，全部通过该步骤才算通过；耗时断言单位为毫秒。</div>
                 </el-tab-pane>
               </el-tabs>
 
@@ -694,6 +729,7 @@ const activeStep = computed(() => (current.value?.steps || []).find(s => s.id ==
 const paramCount = computed(() => (stepForm.value?.params || []).filter(p => p.enabled && p.key).length)
 const headerCount = computed(() => (stepForm.value?.headers || []).filter(h => h.enabled && h.key).length)
 const extractCount = computed(() => (stepForm.value?.extracts || []).filter(e => e.name && e.name.trim()).length)
+const assertCount = computed(() => (stepForm.value?.assertions || []).length)
 
 function openStepEditor(st) {
   activeStepId.value = st.id
@@ -709,6 +745,7 @@ function openStepEditor(st) {
     body_type: s.body_type || 'none',
     body: s.body || '',
     extracts: (s.extracts || []).map(e => ({ name: e.name || '', source: e.source || 'body_json', path: e.path || '' })),
+    assertions: (s.assertions || []).map(a => ({ type: a.type || 'status', op: a.op || '==', value: a.value ?? '', path: a.path || '' })),
   }
 }
 
@@ -868,6 +905,7 @@ onMounted(loadProjects)
 .c-key { width: 240px; flex-shrink: 0; }
 .c-val { flex: 1; min-width: 120px; }
 .c-src { width: 130px; flex-shrink: 0; }
+.c-op2 { width: 96px; flex-shrink: 0; }
 .kv-head .c-key { width: 240px; padding-left: 26px; }
 .kv-head .c-src { padding-left: 26px; }
 .kv-head .c-val { flex: 1; }
