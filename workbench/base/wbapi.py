@@ -2159,6 +2159,54 @@ class SettingBody(BaseModel):
     description: str | None = None
 
 
+@router.get("/ai-usage-stats")
+def ai_usage_stats(db: Session = Depends(get_db)):
+    """S-05 用量统计：汇总 AI 调用流水（wb_ai_call_logs）。"""
+    from datetime import datetime, timedelta
+
+    total = db.query(wb.WbAiCallLog).count()
+    ok_n = db.query(wb.WbAiCallLog).filter(wb.WbAiCallLog.success == 1).count()
+    pt = db.query(func.coalesce(func.sum(wb.WbAiCallLog.prompt_tokens), 0)).scalar() or 0
+    ct = db.query(func.coalesce(func.sum(wb.WbAiCallLog.completion_tokens), 0)).scalar() or 0
+    avg_ms = db.query(func.avg(wb.WbAiCallLog.duration_ms)).scalar()
+
+    # 按模型
+    by_model = []
+    for name, calls, succ, p, c, ms in (
+        db.query(
+            wb.WbAiCallLog.model_name, func.count(wb.WbAiCallLog.id),
+            func.sum(wb.WbAiCallLog.success), func.coalesce(func.sum(wb.WbAiCallLog.prompt_tokens), 0),
+            func.coalesce(func.sum(wb.WbAiCallLog.completion_tokens), 0), func.avg(wb.WbAiCallLog.duration_ms),
+        ).group_by(wb.WbAiCallLog.model_name).all()
+    ):
+        by_model.append({"model_name": name, "calls": calls, "success": int(succ or 0),
+                         "prompt_tokens": int(p), "completion_tokens": int(c), "avg_ms": int(ms or 0)})
+
+    # 按天（近 14 天）
+    since = datetime.now() - timedelta(days=13)
+    by_day = []
+    for day, calls, succ in (
+        db.query(func.date(wb.WbAiCallLog.created_at), func.count(wb.WbAiCallLog.id), func.sum(wb.WbAiCallLog.success))
+        .filter(wb.WbAiCallLog.created_at >= since)
+        .group_by(func.date(wb.WbAiCallLog.created_at)).order_by(func.date(wb.WbAiCallLog.created_at)).all()
+    ):
+        by_day.append({"day": str(day), "calls": calls, "success": int(succ or 0)})
+
+    # 最近 20 条流水
+    recent = []
+    for r in db.query(wb.WbAiCallLog).order_by(wb.WbAiCallLog.id.desc()).limit(20).all():
+        recent.append(row(r, "id", "scene", "model_name", "prompt_tokens", "completion_tokens",
+                          "duration_ms", "success", "error_msg", "created_at"))
+
+    return {
+        "total": total, "success": ok_n,
+        "success_rate": round(ok_n / total * 100, 1) if total else 0,
+        "prompt_tokens": int(pt), "completion_tokens": int(ct),
+        "avg_ms": int(avg_ms) if avg_ms else 0,
+        "by_model": by_model, "by_day": by_day, "recent": recent,
+    }
+
+
 @router.get("/settings")
 def list_settings(group: str | None = None, db: Session = Depends(get_db)):
     q = db.query(wb.WbSetting)

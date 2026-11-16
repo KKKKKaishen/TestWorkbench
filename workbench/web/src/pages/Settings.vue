@@ -32,7 +32,36 @@
 
     <div class="card mb16">
       <div class="sec-title">AI 调用用量</div>
-      <div class="muted">连接测试与 AI 生成的调用流水（场景 / 模型 / 耗时 / 成功与否）将在此汇总展示（P1 后续版本完善图表）。</div>
+      <template v-if="usage">
+        <div class="usage-cards">
+          <div class="u-card"><div class="u-num">{{ usage.total }}</div><div class="u-label">调用总数</div></div>
+          <div class="u-card"><div class="u-num">{{ usage.success_rate }}%</div><div class="u-label">成功率</div></div>
+          <div class="u-card"><div class="u-num">{{ usage.prompt_tokens }}</div><div class="u-label">输入 Tokens</div></div>
+          <div class="u-card"><div class="u-num">{{ usage.completion_tokens }}</div><div class="u-label">输出 Tokens</div></div>
+          <div class="u-card"><div class="u-num">{{ usage.avg_ms }}ms</div><div class="u-label">平均耗时</div></div>
+        </div>
+        <el-table v-if="usage.by_model.length" :data="usage.by_model" size="small" style="margin-top: 12px">
+          <el-table-column prop="model_name" label="模型" min-width="180" />
+          <el-table-column prop="calls" label="调用次数" width="100" />
+          <el-table-column prop="success" label="成功" width="80" />
+          <el-table-column prop="prompt_tokens" label="输入 Tokens" width="110" />
+          <el-table-column prop="completion_tokens" label="输出 Tokens" width="110" />
+          <el-table-column prop="avg_ms" label="平均耗时(ms)" width="120" />
+        </el-table>
+        <el-table v-if="usage.recent.length" :data="usage.recent" size="small" style="margin-top: 12px">
+          <el-table-column prop="created_at" label="时间" width="170" />
+          <el-table-column prop="scene" label="场景" width="150" />
+          <el-table-column prop="model_name" label="模型" min-width="160" />
+          <el-table-column label="结果" width="80">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.success ? 'success' : 'danger'" effect="plain">{{ row.success ? '成功' : '失败' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="error_msg" label="错误信息" min-width="180" show-overflow-tooltip />
+        </el-table>
+        <div v-if="!usage.total" class="muted" style="margin-top: 8px">暂无调用记录：配置模型 key 并测试连通后，这里将展示调用流水。</div>
+      </template>
+      <div v-else class="muted">加载中…</div>
     </div>
 
     <div class="card">
@@ -51,6 +80,7 @@ const aiSettings = ref([])
 const editing = ref('')
 const editValue = ref('')
 const testing = ref('')
+const usage = ref(null)
 
 onMounted(load)
 
@@ -63,6 +93,9 @@ async function load() {
     const provider = k.split('.')[1]
     return found || { setting_key: k, setting_group: 'ai_model', setting_value: '', is_secret: 1, has_value: false, description: `${provider} API key` }
   })
+  try {
+    usage.value = await get('/wb/ai-usage-stats')
+  } catch (e) { /* 统计加载失败不阻塞设置页 */ }
 }
 
 function startEdit(row) {
@@ -99,4 +132,11 @@ async function testConn(row) {
 
 <style scoped>
 .sec-title { font-weight: 600; margin-bottom: 10px; font-size: 14px; }
+.usage-cards { display: flex; gap: 12px; flex-wrap: wrap; }
+.u-card {
+  flex: 1; min-width: 120px; padding: 14px 16px; border-radius: 10px;
+  background: #f8fafc; border: 1px solid #eef1f6; text-align: center;
+}
+.u-num { font-size: 22px; font-weight: 700; color: var(--wb-accent, #2563eb); }
+.u-label { font-size: 12px; color: #6b7280; margin-top: 4px; }
 </style>
