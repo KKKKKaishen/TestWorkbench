@@ -18,6 +18,9 @@
           <el-button type="primary" :disabled="!projectId" @click="openGenerate">
             <el-icon><MagicStick /></el-icon>AI 生成脚本骨架
           </el-button>
+          <el-button :disabled="!projectId" @click="openImport">
+            <el-icon><Upload /></el-icon>手动导入脚本
+          </el-button>
           <span v-if="genNote" class="muted" style="font-size:12px">{{ genNote }}</span>
         </div>
         <el-table :data="scripts" v-loading="loading" stripe>
@@ -118,6 +121,26 @@
       </template>
     </el-dialog>
 
+    <!-- 手动导入脚本 -->
+    <el-dialog v-model="importDlg" title="手动导入脚本" width="860px" top="4vh">
+      <div class="toolbar" style="margin-bottom:10px">
+        <el-input v-model="importForm.title" placeholder="脚本标题（选文件后自动填入文件名）" style="flex:1" />
+        <el-input v-model="importForm.case_no" placeholder="关联用例编号（可选）" style="width:180px" />
+      </div>
+      <el-input v-model="importForm.script" type="textarea" :rows="20" class="code-editor"
+                placeholder="粘贴 pytest + Playwright（sync API）脚本，需包含 def test_xxx(page): 测试函数" spellcheck="false" />
+      <div class="toolbar" style="margin-top:10px; margin-bottom:0">
+        <button class="file-btn" type="button">选择本地 .py 文件（可多选，直接批量导入）
+          <input type="file" accept=".py" multiple @change="onImportFiles" />
+        </button>
+        <span class="muted" style="font-size:12px">导入后状态为「可执行」，可直接点运行；关联用例编号为空则不挂接用例库。</span>
+      </div>
+      <template #footer>
+        <el-button @click="importDlg = false">取消</el-button>
+        <el-button type="primary" :disabled="!importForm.script.trim()" @click="saveImport">保存并创建</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 执行详情 -->
     <el-drawer v-model="runDrawer" size="62%" :title="runDetail ? `执行详情 #${runDetail.id} · ${runDetail.script_title}` : ''">
       <template v-if="runDetail">
@@ -163,6 +186,7 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { get, post, put, del } from '../api'
+import { MagicStick, Upload } from '@element-plus/icons-vue'
 
 const projects = ref([])
 const projectId = ref(null)
@@ -186,6 +210,10 @@ const genNote = ref('')
 const editorDlg = ref(false)
 const editing = ref(null)
 const editCode = ref('')
+
+// 手动导入
+const importDlg = ref(false)
+const importForm = ref({ title: '', case_no: '', script: '' })
 
 // 运行
 const runningId = ref(null)
@@ -260,6 +288,56 @@ async function saveScript() {
   loadTab('scripts')
 }
 
+// ---- 手动导入 ----
+function openImport() {
+  importForm.value = { title: '', case_no: '', script: '' }
+  importDlg.value = true
+}
+
+async function saveImport() {
+  const f = importForm.value
+  try {
+    const r = await post('/wb/auto-scripts', { project_id: projectId.value, title: f.title, script: f.script, case_no: f.case_no || null })
+    ElMessage.success(`脚本已导入（#${r.id}），可执行`)
+    importDlg.value = false
+    loadTab('scripts')
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+
+async function onImportFiles(ev) {
+  const files = Array.from(ev.target.files || [])
+  ev.target.value = ''
+  if (!files.length) return
+  let ok = 0
+  const errs = []
+  for (const file of files) {
+    try {
+      const text = await file.text()
+      if (!text.includes('def test_')) {
+        errs.push(`${file.name}：无 test 函数`)
+        continue
+      }
+      await post('/wb/auto-scripts', {
+        project_id: projectId.value,
+        title: file.name.replace(/\.py$/i, ''),
+        script: text,
+        case_no: null
+      })
+      ok += 1
+    } catch (e) {
+      errs.push(`${file.name}：${e.message}`)
+    }
+  }
+  if (ok) {
+    ElMessage.success(`已导入 ${ok} 个脚本，可执行`)
+    importDlg.value = false
+    loadTab('scripts')
+  }
+  if (errs.length) ElMessage.warning(errs.join('；'))
+}
+
 // ---- 运行（轮询状态） ----
 async function runScript(row) {
   runningId.value = row.id
@@ -313,6 +391,13 @@ async function removeScript(row) {
 
 <style scoped>
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.file-btn {
+  position: relative; overflow: hidden; cursor: pointer;
+  border: 1px dashed var(--wb-border, #dcdfe6); border-radius: 6px; background: #fff;
+  padding: 7px 14px; font-size: 13px; color: var(--el-text-color-regular, #606266);
+}
+.file-btn:hover { border-color: var(--el-color-primary, #409eff); color: var(--el-color-primary, #409eff); }
+.file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .code-editor :deep(textarea) {
   font-family: Consolas, 'Courier New', monospace; font-size: 13px; line-height: 1.6;
   background: #f8fafc;

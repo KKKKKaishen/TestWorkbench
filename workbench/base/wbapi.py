@@ -2642,6 +2642,28 @@ def generate_auto_scripts(body: AutoGenerateBody, db: Session = Depends(get_db))
                     else "AI key 未配置，已用内置模板生成骨架（编辑脚本补全后即可执行）"}
 
 
+class AutoScriptCreateBody(BaseModel):
+    project_id: int
+    title: str
+    script: str
+    case_no: str | None = None
+
+
+@router.post("/auto-scripts")
+def create_auto_script(body: AutoScriptCreateBody, db: Session = Depends(get_db)):
+    """手动导入脚本：粘贴或上传 .py 文件内容直接建脚本（status=ready 可执行）。"""
+    if not body.script.strip():
+        raise HTTPException(400, "脚本内容为空")
+    if "def test_" not in body.script:
+        raise HTTPException(400, "脚本中未找到 test 函数（需为 pytest 格式，如 def test_xxx(page):）")
+    s = wb.WbAutoScript(project_id=body.project_id, case_id=None, case_no=body.case_no,
+                        title=body.title.strip() or "手动导入脚本", script=body.script,
+                        gen_source="manual", status="ready")
+    db.add(s)
+    db.commit()
+    return {"id": s.id, "title": s.title, "gen_source": "manual"}
+
+
 @router.get("/auto-scripts/{sid}")
 def get_auto_script(sid: int, db: Session = Depends(get_db)):
     s = db.get(wb.WbAutoScript, sid)
