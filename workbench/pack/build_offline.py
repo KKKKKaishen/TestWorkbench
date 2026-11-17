@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PACK = Path(__file__).resolve().parent
@@ -23,8 +24,9 @@ VENV_PY = BASE / "venv" / "Scripts" / "python.exe"
 WEB_DIST = WORKBENCH / "web" / "dist"
 
 DIST = PACK / "dist"
+SHELL_BUILD = DIST / "shell_build"
+SHELL_DIST = SHELL_BUILD / "CyuWorkshop"
 SERVER_DIST = DIST / "server"
-SHELL_DIST = DIST / "CyuWorkshop"
 PKG = DIST / "CyuWorkshop"
 
 BROWSER_DIRS = ("chromium-1255", "chromium_headless_shell-1255", "ffmpeg-1011", "ffmpeg-1013")
@@ -33,6 +35,14 @@ SERVER_EXCLUDES = [
     "--exclude-module", "torch", "--exclude-module", "torchvision", "--exclude-module", "functorch",
     "--exclude-module", "transformers", "--exclude-module", "IPython", "--exclude-module", "jupyter",
     "--exclude-module", "notebook", "--exclude-module", "tensorboard", "--exclude-module", "sympy",
+    # 纯测试包树，运行时永不使用（spacy.tests 含数十种语言的语料测试）
+    "--exclude-module", "spacy.tests", "--exclude-module", "thinc.tests",
+    "--exclude-module", "langchain_classic.agents", "--exclude-module", "langchain_community.tools",
+    # OCR/unstructured_inference 深链：离线包不用 OCR（PDF 主链走 pdfminer 版面还原，
+    # partition_pdf 已在 file_handle.py 改为延迟导入，缺失时自动降级 PyPDFLoader）
+    "--exclude-module", "onnxruntime", "--exclude-module", "onnx",
+    "--exclude-module", "cv2", "--exclude-module", "unstructured_inference",
+    "--exclude-module", "unstructured.partition.pdf_image",
 ]
 
 
@@ -43,10 +53,19 @@ def run(cmd, **kw):
         sys.exit(f"命令失败（{r.returncode}）: {cmd[:3]}...")
 
 
+def _rename_stale(d: Path):
+    """旧产物改名为 .stale-时间戳（不触发批量删除保护，构建成功后可手动清理）。"""
+    if d.exists():
+        dst = d.with_name(d.name + ".stale-" + time.strftime("%H%M%S"))
+        os.rename(d, dst)
+        print(f"旧产物已改名: {d.name} -> {dst.name}")
+
+
 def clean():
-    for d in (SERVER_DIST, SHELL_DIST, PKG):
-        if d.exists():
-            shutil.rmtree(d)
+    """旧产物改名腾位（PyInstaller --noconfirm 也可以覆盖，但改名更稳且保留旧件可回溯）。"""
+    _rename_stale(PKG)
+    _rename_stale(SERVER_DIST)
+    _rename_stale(SHELL_DIST)
 
 
 def build_server():
@@ -56,6 +75,7 @@ def build_server():
         "--distpath", DIST, "--workpath", PACK / "build" / "server",
         "--specpath", PACK / "build" / "server",
         "--paths", BASE,
+        "--add-data", f"{WEB_DIST};web_dist",
         "--add-data", f"{BASE / 'static'};static",
         "--collect-all", "playwright",
         "--collect-all", "pytest_playwright",
@@ -68,7 +88,7 @@ def build_shell():
     run([
         VENV_PY, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir",
         "--name", "CyuWorkshop", "--windowed",
-        "--distpath", DIST, "--workpath", PACK / "build" / "shell",
+        "--distpath", SHELL_BUILD, "--workpath", PACK / "build" / "shell",
         "--specpath", PACK / "build" / "shell",
         PACK / "run_shell.py",
     ])

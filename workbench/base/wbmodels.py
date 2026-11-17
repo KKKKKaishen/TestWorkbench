@@ -22,9 +22,14 @@ from sqlalchemy import (
 from models.database import Base, LongText
 
 
+# 主键统一类型：MySQL 保持 BigInteger 自增；SQLite 下 BIGINT 主键不是 rowid 别名
+# （不会自动自增，插入 NOT NULL 失败），映射为 INTEGER 触发 SQLite 的 rowid 自增。
+WbPK = BigInteger().with_variant(Integer(), "sqlite")
+
+
 class WbProject(Base):
     __tablename__ = "wb_projects"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     name = Column(String(100), nullable=False)
     code = Column(String(50), nullable=False, unique=True)
     description = Column(Text)
@@ -36,7 +41,7 @@ class WbProject(Base):
 
 class WbRequirement(Base):
     __tablename__ = "wb_requirements"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     title = Column(String(200), nullable=False)
     content = Column(LongText)
@@ -50,7 +55,7 @@ class WbRequirement(Base):
 
 class WbTestPoint(Base):
     __tablename__ = "wb_test_points"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     requirement_id = Column(BigInteger, ForeignKey("wb_requirements.id", ondelete="CASCADE"), nullable=False, index=True)
     project_id = Column(BigInteger, nullable=False, index=True)
     title = Column(String(200), nullable=False)
@@ -63,7 +68,7 @@ class WbTestPoint(Base):
 
 class WbTestCase(Base):
     __tablename__ = "wb_test_cases"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     test_point_id = Column(BigInteger, ForeignKey("wb_test_points.id", ondelete="SET NULL"), index=True)
     case_no = Column(String(50), nullable=False, unique=True)
@@ -92,7 +97,7 @@ class WbTestCase(Base):
 
 class WbApiEnvironment(Base):
     __tablename__ = "wb_api_environments"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     name = Column(String(100), nullable=False)
     base_url = Column(String(255))
@@ -103,7 +108,7 @@ class WbApiEnvironment(Base):
 
 class WbApiCollection(Base):
     __tablename__ = "wb_api_collections"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     parent_id = Column(BigInteger, index=True)
     name = Column(String(100), nullable=False)
@@ -113,7 +118,7 @@ class WbApiCollection(Base):
 
 class WbApiRequest(Base):
     __tablename__ = "wb_api_requests"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     collection_id = Column(BigInteger, ForeignKey("wb_api_collections.id", ondelete="CASCADE"), index=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     name = Column(String(200), nullable=False)
@@ -133,7 +138,7 @@ class WbApiRequest(Base):
 class WbApiScenario(Base):
     """接口测试场景树（Apifox 自动化测试式）：is_folder=1 为目录节点，目录下可再建目录或流程。"""
     __tablename__ = "wb_api_scenarios"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     parent_id = Column(BigInteger, index=True)  # 上级目录（NULL = 根）
     is_folder = Column(Integer, nullable=False, default=0)  # 1 = 目录，0 = 测试流程
@@ -150,7 +155,7 @@ class WbApiScenarioStep(Base):
     """场景步骤：source=api 引用接口管理接口 / source=case 引用用例库接口用例；
     snapshot 为添加时的参数快照，运行按快照执行，不受原接口后续修改影响。"""
     __tablename__ = "wb_api_scenario_steps"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     scenario_id = Column(BigInteger, ForeignKey("wb_api_scenarios.id", ondelete="CASCADE"), nullable=False, index=True)
     source = Column(String(20), nullable=False, default="api")  # api / case
     ref_id = Column(BigInteger, index=True)  # 接口 id 或接口用例 id
@@ -163,7 +168,7 @@ class WbApiScenarioStep(Base):
 
 class WbApiRequestHistory(Base):
     __tablename__ = "wb_api_request_history"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     request_id = Column(BigInteger, index=True)
     project_id = Column(BigInteger, nullable=False, index=True)
     environment_id = Column(BigInteger)
@@ -180,7 +185,7 @@ class WbApiRequestHistory(Base):
 
 class WbExecutionPlan(Base):
     __tablename__ = "wb_execution_plans"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     name = Column(String(200), nullable=False)
     plan_type = Column(String(20), nullable=False)
@@ -200,7 +205,7 @@ class WbExecutionPlan(Base):
 
 class WbExecutionPlanCase(Base):
     __tablename__ = "wb_execution_plan_cases"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     plan_id = Column(BigInteger, ForeignKey("wb_execution_plans.id", ondelete="CASCADE"), nullable=False, index=True)
     case_id = Column(BigInteger, ForeignKey("wb_test_cases.id"), nullable=False, index=True)
     result = Column(String(20), nullable=False, default="pending")
@@ -218,7 +223,7 @@ class WbExecutionPlanCase(Base):
 
 class WbExecutionRecord(Base):
     __tablename__ = "wb_execution_records"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     plan_case_id = Column(BigInteger, ForeignKey("wb_execution_plan_cases.id", ondelete="CASCADE"), nullable=False, index=True)
     case_id = Column(BigInteger, nullable=False, index=True)
     actual_result = Column(Text)
@@ -231,7 +236,7 @@ class WbExecutionRecord(Base):
 
 class WbBug(Base):
     __tablename__ = "wb_bugs"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     bug_no = Column(String(50), nullable=False, unique=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     title = Column(String(200), nullable=False)
@@ -254,7 +259,7 @@ class WbBug(Base):
 
 class WbBugLink(Base):
     __tablename__ = "wb_bug_links"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     bug_id = Column(BigInteger, ForeignKey("wb_bugs.id", ondelete="CASCADE"), nullable=False, index=True)
     link_type = Column(String(20), nullable=False)
     link_id = Column(BigInteger, nullable=False)
@@ -267,7 +272,7 @@ class WbBugLink(Base):
 
 class WbTestLog(Base):
     __tablename__ = "wb_test_logs"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     plan_id = Column(BigInteger, index=True)
     log_type = Column(String(20), nullable=False, default="execution")
@@ -280,7 +285,7 @@ class WbTestLog(Base):
 
 class WbAttachment(Base):
     __tablename__ = "wb_attachments"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     owner_type = Column(String(30), nullable=False)
     owner_id = Column(BigInteger, nullable=False)
     file_name = Column(String(255), nullable=False)
@@ -293,7 +298,7 @@ class WbAttachment(Base):
 
 class WbRegressionSet(Base):
     __tablename__ = "wb_regression_sets"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     name = Column(String(200), nullable=False)
     description = Column(Text)
@@ -304,7 +309,7 @@ class WbRegressionSet(Base):
 
 class WbRegressionSetItem(Base):
     __tablename__ = "wb_regression_set_items"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     set_id = Column(BigInteger, ForeignKey("wb_regression_sets.id", ondelete="CASCADE"), nullable=False, index=True)
     case_id = Column(BigInteger, ForeignKey("wb_test_cases.id"), nullable=False, index=True)
     added_at = Column(DateTime, default=func.now())
@@ -313,7 +318,7 @@ class WbRegressionSetItem(Base):
 
 class WbRegressionRun(Base):
     __tablename__ = "wb_regression_runs"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     set_id = Column(BigInteger, ForeignKey("wb_regression_sets.id"), nullable=False, index=True)
     project_id = Column(BigInteger, nullable=False)
     plan_id = Column(BigInteger, ForeignKey("wb_execution_plans.id", ondelete="SET NULL"))
@@ -328,7 +333,7 @@ class WbRegressionRun(Base):
 class WbRegressionSchedule(Base):
     """回归定时计划：按 cron 表达式定时触发回归集执行（调度线程每 30s 扫描）。"""
     __tablename__ = "wb_regression_schedules"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     set_id = Column(BigInteger, ForeignKey("wb_regression_sets.id", ondelete="CASCADE"), nullable=False, index=True)
     project_id = Column(BigInteger, nullable=False, index=True)
     name = Column(String(200), nullable=False)
@@ -343,7 +348,7 @@ class WbRegressionSchedule(Base):
 class WbAutoScript(Base):
     """自动化脚本（EX-M1）：pytest + Playwright，AI 生成骨架后人工补全。"""
     __tablename__ = "wb_auto_scripts"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     case_id = Column(BigInteger, ForeignKey("wb_test_cases.id", ondelete="SET NULL"), index=True)
     case_no = Column(String(50))  # 用例编号快照（用例删除后仍可溯源）
@@ -359,7 +364,7 @@ class WbAutoScript(Base):
 class WbAutoRun(Base):
     """自动化执行记录（EX-M2）：独立 pytest 子进程执行，产物归档 uploads/auto_runs/{id}。"""
     __tablename__ = "wb_auto_runs"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     script_id = Column(BigInteger, ForeignKey("wb_auto_scripts.id", ondelete="CASCADE"), nullable=False, index=True)
     project_id = Column(BigInteger, nullable=False, index=True)
     status = Column(String(20), nullable=False, default="running")  # running/passed/failed/error
@@ -377,7 +382,7 @@ class WbAutoRun(Base):
 
 class WbReport(Base):
     __tablename__ = "wb_reports"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
     plan_id = Column(BigInteger, index=True)
     report_type = Column(String(20), nullable=False, default="iteration")
@@ -391,7 +396,7 @@ class WbReport(Base):
 
 class WbSetting(Base):
     __tablename__ = "wb_settings"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     setting_key = Column(String(100), nullable=False, unique=True)
     setting_group = Column(String(50), nullable=False, default="general", index=True)
     setting_value = Column(Text)
@@ -402,7 +407,7 @@ class WbSetting(Base):
 
 class WbAiCallLog(Base):
     __tablename__ = "wb_ai_call_logs"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     scene = Column(String(30), nullable=False)
     model_name = Column(String(60), nullable=False)
     prompt_tokens = Column(Integer)
@@ -420,7 +425,7 @@ class WbKbChunk(Base):
     与底座 knowledge_files 通过 file_id(VARCHAR36) 关联，project 隔离经 kb_id。
     """
     __tablename__ = "wb_kb_chunks"
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(WbPK, primary_key=True, autoincrement=True)
     kb_id = Column(String(36), nullable=False, index=True)
     file_id = Column(String(36), nullable=False, index=True)
     chunk_no = Column(Integer, nullable=False, default=0)

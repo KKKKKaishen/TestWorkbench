@@ -9,7 +9,10 @@ import chromadb
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from unstructured.chunking.title import chunk_by_title
-from unstructured.partition.pdf import partition_pdf
+
+# 注意：unstructured.partition.pdf 顶层会拉起 unstructured_inference/onnxruntime 整条
+# OCR 深链（离线安装包体积敏感且 frozen 下兼容性差），改为使用处延迟导入；
+# 导入失败仅影响 PDF 的 unstructured 快速提取与 OCR 回退，版面还原主链与 PyPDFLoader 不受影响
 
 from config import (
     get_chroma_config,
@@ -123,6 +126,8 @@ class DocumentProcessor:
             return documents
 
         try:
+            from unstructured.partition.pdf import partition_pdf  # 延迟导入（见顶部注释）
+
             elements = partition_pdf(filename=file_path, strategy="fast", languages=["zh"])
             logger.info("partition_pdf 提取元素数: %d", len(elements))
             if not elements:
@@ -251,6 +256,8 @@ class DocumentProcessor:
         """OCR回退方案：用于图片型PDF"""
         logger.info("使用OCR方案提取PDF内容")
         try:
+            from unstructured.partition.pdf import partition_pdf  # 延迟导入（见顶部注释）
+
             elements = partition_pdf(
                 filename=file_path,
                 strategy="hi_res",

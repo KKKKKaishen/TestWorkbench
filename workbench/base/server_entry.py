@@ -21,9 +21,9 @@ def _app_dir() -> Path:
 
 
 def _package_root() -> Path:
-    """安装包根目录（app/ 的上一级）。"""
+    """安装包根目录（server.exe 位于 <根>/app/server/ 下，向上三级）。"""
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent.parent
+        return Path(sys.executable).resolve().parent.parent.parent
     return Path(__file__).resolve().parent.parent
 
 
