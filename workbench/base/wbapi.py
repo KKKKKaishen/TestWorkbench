@@ -13,13 +13,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi import Header as _Header, Request as _Request, Response as _Response, \
+    Depends as _Depends
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text as _text
 from sqlalchemy.orm import Session
 
 import wbmodels as wb
 from config import get_upload_dir
-from models.database import get_db
+from models.database import get_db, get_engine
 
 logger = logging.getLogger(__name__)
 
@@ -3811,3 +3813,214 @@ async def search_knowledge_wb(body: KnowledgeSearchBody, db: Session = Depends(g
         "file_id": r[0].file_id,
     } for r in ranked]
     return {"results": results, "total_chunks": total, "mode": "keyword"}
+
+
+# ================= 云同步（客户端配置端点 + 服务器推拉端点） =================
+
+import hashlib as _hashlib
+import os as _os
+import time as _time
+import uuid as _uuid
+
+import wbsync
+
+
+@router.get("/sync/status")
+def sync_status():
+    """客户端同步状态（本机端点，无鉴权）。"""
+    return wbsync.status_snapshot()
+
+
+class SyncConfigBody(BaseModel):
+    cloud_url: str = ""
+    token: str = ""
+    client_name: str = ""
+    enabled: bool = True
+
+
+@router.post("/sync/config")
+def sync_config(body: SyncConfigBody):
+    """启用/更新/停用云同步。启用时注册客户端并一次性平移存量 ID。"""
+    try:
+        if body.enabled:
+            return wbsync.enable_sync(body.cloud_url, body.token, body.client_name)
+        return wbsync.disable_sync()
+    except Exception as ex:
+        raise HTTPException(400, f"同步配置失败：{ex}")
+
+
+@router.post("/sync/now")
+def sync_now():
+    """触发一次立即同步。"""
+    wbsync.trigger_sync_now()
+    return {"ok": True}
+
+
+def _check_sync_token(x_sync_token: str = _Header(default="")):
+    """服务器侧推拉端点鉴权：WB_SYNC_TOKEN 未配置 = 云同步未启用。"""
+    expected = (_os.getenv("WB_SYNC_TOKEN") or "").strip()
+    if not expected:
+        raise HTTPException(503, "服务器未启用云同步（未配置 WB_SYNC_TOKEN）")
+    if x_sync_token != expected:
+        raise HTTPException(401, "同步访问令牌无效")
+
+
+@router.get("/sync/ping")
+def sync_ping(_t: None = _Depends(_check_sync_token)):
+    return {"ok": True, "server_time": _time.time_ns() // 1000}
+
+
+@router.post("/sync/register")
+def sync_register(body: dict, _t: None = _Depends(_check_sync_token)):
+    """客户端注册：分配 client_id 与 ID 区间序号（ordinal）。"""
+    from models.database import create_session
+
+    name = str(body.get("client_name") or "客户端")[:50]
+    with create_session() as db:
+        count = db.execute(_text(
+            "SELECT COUNT(*) FROM wb_sync_state WHERE state_key LIKE 'client:%'")).scalar() or 0
+        client_id = _uuid.uuid4().hex
+        ordinal = int(count) + 1
+        db.execute(_text(
+            "INSERT INTO wb_sync_state(state_key, state_value) VALUES(:k, :v)"),
+            {"k": f"client:{client_id}", "v": json.dumps(
+                {"name": name, "ordinal": ordinal,
+                 "registered_at": datetime.now().isoformat()}, ensure_ascii=False)})
+        db.commit()
+    logger.info("同步客户端注册：%s（ordinal=%d）", name, ordinal)
+    return {"client_id": client_id, "ordinal": ordinal}
+
+
+@router.post("/sync/push")
+def sync_push(body: dict, _t: None = _Depends(_check_sync_token)):
+    """客户端推送变更行：按 stamp LWW 落库，被拒行说明服务器已有更新版本。"""
+    rows = body.get("rows") or []
+    accepted, rejected = [], []
+    now_us = _time.time_ns() // 1000
+    max_future = now_us + 5 * 60 * 1_000_000  # 客户端时钟超前的钳制上限
+    tables = wbsync._synced_tables()
+    eng = get_engine()
+    conn = eng.connect()
+    try:
+        with wbsync.apply_bypass(conn):
+            for r in rows:
+                try:
+                    tname = str(r.get("table") or "")
+                    pk = int(r.get("pk"))
+                    stamp = int(r.get("stamp") or 0)
+                    t = tables.get(tname)
+                    if t is None or pk <= 0 or stamp <= 0:
+                        raise ValueError("行参数不完整")
+                    if stamp > max_future:
+                        stamp = now_us  # 时钟超前钳制
+                    existing = conn.execute(_text(
+                        "SELECT stamp FROM wb_sync_rowver WHERE table_name = :t AND row_pk = :p"),
+                        {"t": tname, "p": pk}).first()
+                    if existing and int(existing[0]) >= stamp:
+                        rejected.append({"table": tname, "pk": pk, "reason": "server_newer"})
+                        continue
+                    client = str(r.get("client") or "client")[:40]
+                    if r.get("op") == "d":
+                        hard, null = wbsync._collect_cascade_victims(conn, [(tname, pk)])
+                        conn.execute(_text(f"DELETE FROM `{tname}` WHERE id = :p"), {"p": pk})
+                        wbsync._rv_write(conn, tname, pk, stamp, client, deleted=True, dirty=False)
+                        wbsync._apply_cascade_aftermath(conn, hard, null, stamp, client)
+                    else:
+                        wbsync._upsert_row(conn, t, r.get("data") or {})
+                        wbsync._rv_write(conn, tname, pk, stamp, client, deleted=False, dirty=False)
+                    accepted.append({"table": tname, "pk": pk})
+                except Exception as ex:
+                    rejected.append({"table": str(r.get("table")), "pk": r.get("pk"),
+                                     "reason": str(ex)[:200]})
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"accepted": accepted, "rejected": rejected}
+
+
+@router.get("/sync/pull")
+def sync_pull(cursor_stamp: int = 0, cursor_id: int = 0, limit: int = 500,
+              _t: None = _Depends(_check_sync_token)):
+    """客户端拉取服务器变更（游标 = (stamp, rowver.id)，整数纪元微秒）。"""
+    limit = max(1, min(2000, limit))
+    tables = wbsync._synced_tables()
+    eng = get_engine()
+    out = []
+    with eng.connect() as conn:
+        rvs = conn.execute(_text(
+            "SELECT id, table_name, row_pk, stamp, deleted FROM wb_sync_rowver "
+            "WHERE stamp > :cs OR (stamp = :cs AND id > :ci) ORDER BY stamp, id LIMIT :n"),
+            {"cs": cursor_stamp, "ci": cursor_id, "n": limit}).fetchall()
+        for rid, tname, pk, stamp, deleted in rvs:
+            t = tables.get(tname)
+            item = {"table": tname, "pk": pk, "stamp": int(stamp), "deleted": bool(deleted)}
+            if t is not None and not deleted:
+                r = conn.execute(t.select().where(t.c.id == pk)).first()
+                if r is None:
+                    item["deleted"] = True  # 有版本但行已不在：按墓碑返回
+                else:
+                    item["data"] = wbsync._row_to_payload(t, r)
+            out.append(item)
+        last = rvs[-1] if rvs else None
+    return {
+        "rows": out,
+        "has_more": len(rvs) >= limit,
+        "cursor_stamp": int(last[3]) if last else cursor_stamp,
+        "cursor_id": int(last[0]) if last else cursor_id,
+    }
+
+
+@router.get("/sync/files/list")
+def sync_files_list(_t: None = _Depends(_check_sync_token)):
+    """动态扫描本机 uploads 清单（附件 + auto_runs 产物），两端对称对账。"""
+    files = wbsync._local_file_inventory()
+    return {"files": [{"rel_path": k, "sha256": v["sha256"], "size": v["size"]}
+                      for k, v in files.items()]}
+
+
+def _safe_rel_path(rel: str) -> str:
+    """路径校验：禁止绝对路径/目录穿越/盘符。"""
+    rel = (rel or "").strip().replace("\\", "/")
+    if not rel or rel.startswith("/") or ".." in rel.split("/") or ":" in rel:
+        raise HTTPException(400, "非法文件路径")
+    return rel
+
+
+@router.post("/sync/files/upload")
+async def sync_files_upload(request: _Request, path: str, _t: None = _Depends(_check_sync_token)):
+    """产物/附件上传（raw 字节流，path 为 uploads 下相对路径）。"""
+    rel = _safe_rel_path(path)
+    data = await request.body()
+    if len(data) > 200 * 1024 * 1024:
+        raise HTTPException(413, "文件过大")
+    target = Path(get_upload_dir()).resolve() / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    sha = _hashlib.sha256(data).hexdigest()
+    target.write_bytes(data)
+    from models.database import create_session
+    with create_session() as db:
+        if db.bind.dialect.name == "mysql":
+            db.execute(_text(
+                "INSERT INTO wb_sync_files(rel_path, sha256, size) VALUES(:r, :s, :z) "
+                "ON DUPLICATE KEY UPDATE sha256 = :s, size = :z, updated_at = CURRENT_TIMESTAMP"),
+                {"r": rel, "s": sha, "z": len(data)})
+        else:
+            db.execute(_text(
+                "INSERT INTO wb_sync_files(rel_path, sha256, size) VALUES(:r, :s, :z) "
+                "ON CONFLICT(rel_path) DO UPDATE SET sha256 = :s, size = :z, "
+                "updated_at = CURRENT_TIMESTAMP"),
+                {"r": rel, "s": sha, "z": len(data)})
+        db.commit()
+    return {"ok": True, "sha256": sha, "size": len(data)}
+
+
+@router.get("/sync/files/download")
+def sync_files_download(path: str, _t: None = _Depends(_check_sync_token)):
+    rel = _safe_rel_path(path)
+    target = Path(get_upload_dir()).resolve() / rel
+    if not target.is_file():
+        raise HTTPException(404, "文件不存在")
+    return _Response(content=target.read_bytes(), media_type="application/octet-stream")

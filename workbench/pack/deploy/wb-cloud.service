@@ -1,0 +1,17 @@
+[Unit]
+Description=Cyu Workshop Cloud Hub (wb-cloud)
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__INSTALL_DIR__/app
+EnvironmentFile=__INSTALL_DIR__/app/data/.env
+ExecStart=__INSTALL_DIR__/app/venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8902 --workers 1
+Restart=always
+RestartSec=5
+# 低内存保护：限制内存防止单点异常拖垮整机
+MemoryMax=600M
+
+[Install]
+WantedBy=multi-user.target

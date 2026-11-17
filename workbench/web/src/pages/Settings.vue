@@ -3,6 +3,48 @@
     <div class="page-title">设置</div>
 
     <div class="card mb16">
+      <div class="sync-head">
+        <div class="sec-title">云同步（多电脑共享数据）</div>
+        <el-tag size="small" effect="plain" :type="syncStatus.online ? 'success' : (syncStatus.enabled ? 'danger' : 'info')">
+          {{ syncStatus.enabled ? (syncStatus.online ? '已连接' : (syncStatus.syncing ? '同步中…' : '离线（断网可继续用）')) : '未启用' }}
+        </el-tag>
+      </div>
+      <div class="muted mb12">
+        启用后本机数据与云服务器双向同步：断网时产生的数据存本地，恢复网络后自动补推；
+        其他电脑录入的数据自动拉取。首次启用会将本机存量数据平移迁移（一次性，约几秒）。
+      </div>
+      <el-form label-width="110px" size="small" style="max-width: 640px">
+        <el-form-item label="服务器地址">
+          <el-input v-model="syncForm.cloud_url" placeholder="https://wb.ka1shen.cn"
+                    :disabled="syncStatus.enabled" />
+        </el-form-item>
+        <el-form-item label="访问令牌">
+          <el-input v-model="syncForm.token" type="password" show-password
+                    placeholder="服务器 WB_SYNC_TOKEN" :disabled="syncStatus.enabled" />
+        </el-form-item>
+        <el-form-item label="本机名称">
+          <el-input v-model="syncForm.client_name" placeholder="如：办公室电脑"
+                    :disabled="syncStatus.enabled" />
+        </el-form-item>
+        <el-form-item>
+          <template v-if="!syncStatus.enabled">
+            <el-button type="primary" :loading="syncSaving" @click="enableSync">启用同步</el-button>
+          </template>
+          <template v-else>
+            <el-button :loading="syncStatus.syncing" @click="syncNow">立即同步</el-button>
+            <el-button type="danger" plain @click="disableSync">停用同步</el-button>
+          </template>
+        </el-form-item>
+      </el-form>
+      <div v-if="syncStatus.enabled" class="sync-info">
+        <span>本机标识：{{ syncStatus.client_name || syncStatus.client_id }}</span>
+        <span>待推送：{{ syncStatus.pending_push }} 条</span>
+        <span v-if="syncStatus.last_sync_at">最后同步：{{ syncStatus.last_sync_at }}</span>
+        <span v-if="syncStatus.last_error" class="sync-err">最近错误：{{ syncStatus.last_error }}</span>
+      </div>
+    </div>
+
+    <div class="card mb16">
       <div class="sec-title">AI 模型（本地大模型 / DeepSeek / GLM / Qwen）</div>
       <div class="muted mb12">
         本地大模型：填 OpenAI 兼容端点即可离线使用（Ollama 默认 http://127.0.0.1:11434/v1，LM Studio 默认 http://127.0.0.1:1234/v1）；
@@ -82,8 +124,8 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { onMounted, onUnmounted, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { get, post, put } from '../api'
 
 const aiSettings = ref([])
@@ -92,7 +134,61 @@ const editValue = ref('')
 const testing = ref('')
 const usage = ref(null)
 
-onMounted(load)
+// 云同步
+const syncStatus = ref({ enabled: false, online: false, pending_push: 0 })
+const syncForm = ref({ cloud_url: 'https://wb.ka1shen.cn', token: '', client_name: '' })
+const syncSaving = ref(false)
+let syncTimer = null
+
+onMounted(() => {
+  load()
+  loadSync()
+  syncTimer = setInterval(loadSync, 5000)
+})
+onUnmounted(() => clearInterval(syncTimer))
+
+async function loadSync() {
+  try {
+    syncStatus.value = await get('/wb/sync/status')
+    if (!syncForm.value.cloud_url && syncStatus.value.cloud_url) {
+      syncForm.value.cloud_url = syncStatus.value.cloud_url
+    }
+    if (!syncForm.value.client_name && syncStatus.value.client_name) {
+      syncForm.value.client_name = syncStatus.value.client_name
+    }
+  } catch (e) { /* 云同步端点不可用（旧版本后端）不影响设置页 */ }
+}
+
+async function enableSync() {
+  if (!syncForm.value.cloud_url || !syncForm.value.token) {
+    ElMessage.warning('请填写服务器地址与访问令牌')
+    return
+  }
+  syncSaving.value = true
+  try {
+    const r = await post('/wb/sync/config', { ...syncForm.value, enabled: true })
+    ElMessage.success(`已启用（本机区间序号 ${r.ordinal}，存量数据已迁移）`)
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    syncSaving.value = false
+    loadSync()
+  }
+}
+
+async function disableSync() {
+  await ElMessageBox.confirm(
+    '停用后本机数据不再与服务器同步（本地数据保留），确定停用？',
+    '停用云同步', { type: 'warning' })
+  await post('/wb/sync/config', { enabled: false })
+  ElMessage.success('已停用')
+  loadSync()
+}
+
+async function syncNow() {
+  await post('/wb/sync/now')
+  ElMessage.info('已触发同步')
+}
 
 async function load() {
   const items = await get('/wb/settings?group=ai_model')
@@ -148,6 +244,10 @@ async function testConn(row) {
 
 <style scoped>
 .sec-title { font-weight: 600; margin-bottom: 10px; font-size: 14px; }
+.sync-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.sync-head .sec-title { margin-bottom: 0; }
+.sync-info { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: #6b7280; padding: 8px 12px; background: #f8fafc; border-radius: 8px; }
+.sync-err { color: #dc2626; }
 .usage-cards { display: flex; gap: 12px; flex-wrap: wrap; }
 .u-card {
   flex: 1; min-width: 120px; padding: 14px 16px; border-radius: 10px;

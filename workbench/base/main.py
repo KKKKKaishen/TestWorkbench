@@ -10,12 +10,20 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 import wbmodels  # noqa: F401  注册 wb_ 表到 Base 元数据（SQLite 开发环境自动建表）
-from api.api_v1 import api_router
-from api.endpoints import auth, chat, knowledge_api, testbench_api, workflow_api
-from config import get_app_env, get_session_secret_key
-from models.database import init_db
-from services import knowledge_service, test_run_service
-from wbapi import router as wb_router
+
+# 精简模式（WB_LITE=1）：云服务器数据中枢部署用。
+# 只挂载 /wb 业务 API 与前端静态资源，跳过知识库/工作流/AI 底座等重依赖（chromadb/langchain），
+# 使 2 核小内存服务器无需安装重型 ML 依赖即可作为多客户端同步中枢运行。
+WB_LITE = (os.getenv("WB_LITE") or "").strip().lower() in ("1", "true", "yes")
+
+from config import get_app_env, get_session_secret_key  # noqa: E402
+from models.database import init_db  # noqa: E402
+from wbapi import router as wb_router  # noqa: E402
+
+if not WB_LITE:
+    from api.api_v1 import api_router
+    from api.endpoints import auth, chat, knowledge_api, testbench_api, workflow_api
+    from services import knowledge_service, test_run_service
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -95,15 +103,19 @@ def _get_session_secret() -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # 后台处理任务不跨进程存活：启动时把卡在 pending/processing 的文件重置为失败，等待用户重试
-    knowledge_service.reset_stale_processing_files()
-    # 执行记录同理：残留的 running 会让该接口文档按占用语义被永久锁死
-    test_run_service.reset_stale_running()
-    # 存量执行结果快照可能含明文凭据（写侧脱敏上线前落库），启动时幂等清洗
-    test_run_service.redact_stored_request_headers()
+    if not WB_LITE:
+        # 后台处理任务不跨进程存活：启动时把卡在 pending/processing 的文件重置为失败，等待用户重试
+        knowledge_service.reset_stale_processing_files()
+        # 执行记录同理：残留的 running 会让该接口文档按占用语义被永久锁死
+        test_run_service.reset_stale_running()
+        # 存量执行结果快照可能含明文凭据（写侧脱敏上线前落库），启动时幂等清洗
+        test_run_service.redact_stored_request_headers()
     # RG-02：回归定时调度线程（每 30s 扫描到期计划，daemon 不阻塞退出）
     from wbapi import start_regression_scheduler
     start_regression_scheduler()
+    # 云同步：装行版本触发器；客户端模式启动同步线程（云模式只装触发器）
+    import wbsync
+    wbsync.on_startup()
     yield
 
 
@@ -120,12 +132,13 @@ def create_app() -> FastAPI:
     if (BASE_DIR / "static").exists():
         app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
-    app.include_router(api_router)
-    app.include_router(auth.router)
-    app.include_router(chat.router)
-    app.include_router(knowledge_api.router)
-    app.include_router(workflow_api.router)
-    app.include_router(testbench_api.router)
+    if not WB_LITE:
+        app.include_router(api_router)
+        app.include_router(auth.router)
+        app.include_router(chat.router)
+        app.include_router(knowledge_api.router)
+        app.include_router(workflow_api.router)
+        app.include_router(testbench_api.router)
     app.include_router(wb_router)
 
     # 全局兜底：任何未处理异常记录完整 traceback 到日志，再返回 500 JSON

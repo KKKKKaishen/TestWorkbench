@@ -431,3 +431,46 @@ class WbKbChunk(Base):
     chunk_no = Column(Integer, nullable=False, default=0)
     content = Column(LongText, nullable=False)
     created_at = Column(DateTime, default=func.now())
+
+
+# ---------------- 云同步机制表（不参与行同步） ----------------
+
+
+class WbSyncRowver(Base):
+    """行版本表：每行业务数据的同步元数据。
+
+    stamp = 最近变更时间戳（LWW 依据）；deleted = 墓碑；dirty = 客户端待推送。
+    SQLite 客户端由触发器维护（写入绕过 wb_sync_apply_flag），MySQL 服务器
+    由 @sync_bypass 会话变量 + AFTER 触发器维护。"""
+    __tablename__ = "wb_sync_rowver"
+    id = Column(WbPK, primary_key=True, autoincrement=True)
+    table_name = Column(String(64), nullable=False)
+    row_pk = Column(BigInteger, nullable=False)
+    stamp = Column(BigInteger, nullable=False)  # 纪元微秒（LWW / 游标排序）
+    client_id = Column(String(40), nullable=False, default="local")
+    deleted = Column(Integer, nullable=False, default=0)
+    dirty = Column(Integer, nullable=False, default=0)
+    __table_args__ = (
+        UniqueConstraint("table_name", "row_pk", name="uk_sync_row"),
+        Index("idx_rv_stamp_id", "stamp", "id"),
+        Index("idx_rv_dirty", "dirty"),
+    )
+
+
+class WbSyncState(Base):
+    """同步状态/配置键值对（本地配置，不随行同步扩散）。"""
+    __tablename__ = "wb_sync_state"
+    id = Column(WbPK, primary_key=True, autoincrement=True)
+    state_key = Column(String(64), nullable=False, unique=True)
+    state_value = Column(Text)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class WbSyncFile(Base):
+    """文件同步清单（rel_path -> sha256），两端各自维护，用于产物/附件对账。"""
+    __tablename__ = "wb_sync_files"
+    id = Column(WbPK, primary_key=True, autoincrement=True)
+    rel_path = Column(String(500), nullable=False, unique=True)
+    sha256 = Column(String(64), nullable=False)
+    size = Column(BigInteger, nullable=False, default=0)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
