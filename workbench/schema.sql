@@ -326,6 +326,43 @@ CREATE TABLE wb_regression_schedules (
   CONSTRAINT fk_rsch_set FOREIGN KEY (set_id) REFERENCES wb_regression_sets(id) ON DELETE CASCADE
 ) COMMENT '回归定时计划（RG-02：cron 定时触发回归集执行）';
 
+CREATE TABLE wb_auto_scripts (
+  id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增ID',
+  project_id    BIGINT UNSIGNED NOT NULL COMMENT '所属项目ID（外键 wb_projects）',
+  case_id       BIGINT UNSIGNED NULL COMMENT '来源用例ID（外键 wb_test_cases，用例删除置NULL）',
+  case_no       VARCHAR(50)  NULL COMMENT '用例编号快照（用例删除后仍可溯源）',
+  title         VARCHAR(200) NOT NULL COMMENT '脚本标题（默认取用例标题）',
+  script        MEDIUMTEXT   NOT NULL COMMENT 'pytest + Playwright 脚本代码',
+  gen_source    VARCHAR(20)  NOT NULL DEFAULT 'ai' COMMENT '生成来源：ai=AI生成，template=模板，manual=手写',
+  status        VARCHAR(20)  NOT NULL DEFAULT 'draft' COMMENT '状态：draft=待补全，ready=可执行',
+  last_run_at   DATETIME     NULL COMMENT '最近一次执行时间',
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  KEY idx_ascr_project (project_id),
+  KEY idx_ascr_case (case_id),
+  CONSTRAINT fk_ascr_project FOREIGN KEY (project_id) REFERENCES wb_projects(id),
+  CONSTRAINT fk_ascr_case FOREIGN KEY (case_id) REFERENCES wb_test_cases(id) ON DELETE SET NULL
+) COMMENT '自动化脚本（EX-M1：pytest+Playwright 骨架，人工补全）';
+
+CREATE TABLE wb_auto_runs (
+  id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增ID',
+  script_id     BIGINT UNSIGNED NOT NULL COMMENT '脚本ID（外键 wb_auto_scripts）',
+  project_id    BIGINT UNSIGNED NOT NULL COMMENT '所属项目ID（冗余，便于按项目查询）',
+  status        VARCHAR(20)  NOT NULL DEFAULT 'running' COMMENT '执行状态：running/passed/failed/error',
+  duration_ms   INT          NULL COMMENT '执行耗时（毫秒）',
+  total_count   INT          NOT NULL DEFAULT 0 COMMENT '用例函数总数',
+  passed_count  INT          NOT NULL DEFAULT 0 COMMENT '通过数',
+  failed_count  INT          NOT NULL DEFAULT 0 COMMENT '失败数',
+  output        MEDIUMTEXT   NULL COMMENT 'pytest 输出尾部（展示与 AI 失败分析输入）',
+  analysis      MEDIUMTEXT   NULL COMMENT 'EX-M3 AI 失败分析结果',
+  analyzed      TINYINT      NOT NULL DEFAULT 0 COMMENT '是否已做过 AI 分析',
+  finished_at   DATETIME     NULL COMMENT '结束时间',
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  KEY idx_arun_script (script_id),
+  KEY idx_arun_project_time (project_id, created_at),
+  CONSTRAINT fk_arun_script FOREIGN KEY (script_id) REFERENCES wb_auto_scripts(id) ON DELETE CASCADE
+) COMMENT '自动化执行记录（EX-M2：独立 pytest 子进程，截图/Trace/视频归档附件表）';
+
 -- =========================================================
 -- 9. 报告 / 设置 / AI 观测
 -- =========================================================

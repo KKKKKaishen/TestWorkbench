@@ -5,7 +5,7 @@ import Cases from './pages/Cases.vue'
 import ApiManage from './pages/ApiManage.vue'
 import Execution from './pages/Execution.vue'
 import ApiTest from './pages/ApiTest.vue'
-import AutoTest from './pages/Placeholder.vue'
+import AutoTest from './pages/AutoTest.vue'
 import Bugs from './pages/Bugs.vue'
 import Logs from './pages/Logs.vue'
 import Regression from './pages/Regression.vue'
@@ -21,7 +21,7 @@ export const routes = [
   { path: '/apimanage', component: ApiManage, meta: { title: '接口管理' } },
   { path: '/exec/functional', component: Execution, meta: { title: '功能测试', planType: 'functional' } },
   { path: '/exec/api', component: ApiTest, meta: { title: '接口测试' } },
-  { path: '/exec/auto', component: AutoTest, meta: { title: '自动化测试', building: true } },
+  { path: '/exec/auto', component: AutoTest, meta: { title: '自动化测试' } },
   { path: '/bugs', component: Bugs, meta: { title: 'Bug 管理' } },
   { path: '/logs', component: Logs, meta: { title: '日志管理' } },
   { path: '/regression', component: Regression, meta: { title: '回归测试' } },

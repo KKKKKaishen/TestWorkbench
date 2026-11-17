@@ -4,6 +4,8 @@
 """
 import json
 import re
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -2481,6 +2483,392 @@ def _bug_regression_ready(db: Session, b: wb.WbBug) -> bool:
                 wb.WbExecutionPlanCase.case_id.in_(case_ids),
                 wb.WbExecutionPlanCase.result == "pass").all())}
     return all(cid in passed for cid in case_ids)
+
+
+# ================= 自动化测试（EX-M1~M3 + L-04） =================
+
+_AI_PROVIDERS = {
+    "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
+    "deepseek": ("https://api.deepseek.com", "deepseek-chat"),
+    "glm": ("https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"),
+}
+
+
+def _call_chat_llm(db: Session, scene: str, system: str, user: str, max_tokens: int = 3000) -> str:
+    """通用 AI 调用（EX-M1 骨架生成 / EX-M3 失败分析共用）。
+    依序尝试设置页已配置 key 的 provider；全未配置抛 400 提示。"""
+    import urllib.error
+    import urllib.request
+
+    last_err = None
+    for provider, (base_url, model) in _AI_PROVIDERS.items():
+        key = _decrypt_wb_secret(db, f"ai.{provider}.api_key")
+        if not key:
+            continue
+        start = time.time()
+        try:
+            req = urllib.request.Request(
+                f"{base_url}/chat/completions",
+                data=json.dumps({
+                    "model": model,
+                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    "max_tokens": max_tokens, "temperature": 0.2,
+                }).encode(),
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode())
+            text = body["choices"][0]["message"]["content"] or ""
+            db.add(wb.WbAiCallLog(scene=scene, model_name=model,
+                                  duration_ms=int((time.time() - start) * 1000), success=1))
+            db.commit()
+            return text
+        except urllib.error.HTTPError as e:
+            last_err = f"{provider} HTTP {e.code}: {e.read().decode()[:200]}"
+        except Exception as e:
+            last_err = f"{provider}: {e}"
+        db.add(wb.WbAiCallLog(scene=scene, model_name=model, success=0, error_msg=last_err[:500]))
+        db.commit()
+    if last_err is None:
+        raise HTTPException(400, "AI 能力未配置：请先在「设置 → AI 模型」中配置任一模型的 API key")
+    raise HTTPException(400, f"AI 调用失败：{last_err}")
+
+
+def _py_name(s: str) -> str:
+    """用例标题转合法 Python 标识符片段。"""
+    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fa5]+", "_", s or "").strip("_")
+    return s[:40] or "case"
+
+
+def _template_skeleton(case: wb.WbTestCase) -> str:
+    """无 AI key 时的确定性模板骨架（人工补全断言）。"""
+    steps = case.steps or []
+    step_lines = []
+    for i, st in enumerate(steps, 1):
+        action = (st.get("action") if isinstance(st, dict) else None) or (st if isinstance(st, str) else "")
+        step_lines.append(f"    # 步骤{i}：{action}")
+        step_lines.append(f"    # TODO 人工补全：将步骤{i}翻译为 Playwright 操作（page.goto / page.click / page.fill ...）")
+    if not step_lines:
+        step_lines = ["    # TODO 人工补全：操作步骤（page.goto / page.click / page.fill ...）"]
+    fn = f"test_{_py_name(case.case_no)}_{_py_name(case.title)}"
+    pre = case.precondition or "无"
+    return f'''"""用例 {case.case_no} {case.title}
+前置条件：{pre}
+预期结果：{case.expected or "（未填写）"}
+
+由工作坊自动生成骨架，TODO 处人工补全后即可执行。
+"""
+from playwright.sync_api import Page, expect
+
+
+def {fn}(page: Page):
+{chr(10).join(step_lines)}
+    # 预期结果断言
+    # TODO 人工补全：expect(page.get_by_text("...")).to_be_visible() 等
+    assert True, "骨架未补全：请编辑脚本后运行"
+'''
+
+
+def _ai_skeleton(db: Session, case: wb.WbTestCase) -> str:
+    system = (
+        "你是资深测试自动化工程师。根据功能测试用例生成 pytest + Playwright（sync API）测试脚本骨架。"
+        "要求：1) 每个用例一个 test 函数，参数为 page: Page；2) 用例步骤写成注释 + 对应的 Playwright 操作示例代码（含合理占位选择器，"
+        "不能确定的地方用 TODO 注释标出）；3) 预期结果用 expect 断言表达（选择器不确定处写 TODO）；"
+        "4) 不确定的目标 URL 用 page.goto('https://TODO-填写实际地址') 占位；5) 只输出 Python 代码，不要解释。"
+    )
+    steps = json.dumps(case.steps or [], ensure_ascii=False)
+    user = f"用例编号：{case.case_no}\n标题：{case.title}\n前置条件：{case.precondition or '无'}\n测试步骤：{steps}\n预期结果：{case.expected or '未填写'}"
+    text = _call_chat_llm(db, "auto_script_gen", system, user)
+    # 剥掉可能的 ```python 围栏
+    m = re.search(r"```(?:python)?\s*(.*?)```", text, re.S)
+    return (m.group(1) if m else text).strip() + "\n"
+
+
+class AutoScriptBody(BaseModel):
+    title: str | None = None
+    script: str | None = None
+    status: str | None = None
+    case_id: int | None = None
+
+
+@router.get("/auto-scripts")
+def list_auto_scripts(project_id: int, db: Session = Depends(get_db)):
+    rows = (db.query(wb.WbAutoScript).filter(wb.WbAutoScript.project_id == project_id)
+            .order_by(wb.WbAutoScript.id.desc()).all())
+    out = []
+    for s in rows:
+        d = row(s, "id", "project_id", "case_id", "case_no", "title", "gen_source", "status",
+                "last_run_at", "created_at", "updated_at")
+        last = (db.query(wb.WbAutoRun).filter(wb.WbAutoRun.script_id == s.id)
+                .order_by(wb.WbAutoRun.id.desc()).first())
+        d["last_run"] = row(last, "id", "status", "passed_count", "failed_count", "total_count",
+                            "duration_ms", "finished_at") if last else None
+        d["script_size"] = len(s.script or "")
+        out.append(d)
+    return out
+
+
+class AutoGenerateBody(BaseModel):
+    project_id: int
+    case_ids: list[int] = []
+
+
+@router.post("/auto-scripts/generate")
+def generate_auto_scripts(body: AutoGenerateBody, db: Session = Depends(get_db)):
+    """EX-M1：从用例库勾选用例 → AI 生成 pytest+Playwright 脚本骨架。
+    AI 未配置时回退确定性模板（同样人工补全可用）。"""
+    created = []
+    for cid in body.case_ids:
+        c = db.get(wb.WbTestCase, cid)
+        if not c or c.project_id != body.project_id:
+            continue
+        try:
+            code, source = _ai_skeleton(db, c), "ai"
+        except HTTPException as e:
+            if "AI 能力未配置" not in str(e.detail) and "AI 调用失败" not in str(e.detail):
+                raise
+            code, source = _template_skeleton(c), "template"
+        s = wb.WbAutoScript(project_id=body.project_id, case_id=c.id, case_no=c.case_no,
+                            title=f"{c.case_no} {c.title}", script=code, gen_source=source)
+        db.add(s)
+        db.flush()
+        created.append({"id": s.id, "title": s.title, "gen_source": source})
+    if not created:
+        raise HTTPException(400, "没有可生成的用例（请检查用例归属）")
+    db.commit()
+    return {"created": created,
+            "ai_used": all(x["gen_source"] == "ai" for x in created),
+            "note": None if any(x["gen_source"] == "ai" for x in created)
+                    else "AI key 未配置，已用内置模板生成骨架（编辑脚本补全后即可执行）"}
+
+
+@router.get("/auto-scripts/{sid}")
+def get_auto_script(sid: int, db: Session = Depends(get_db)):
+    s = db.get(wb.WbAutoScript, sid)
+    if not s:
+        raise HTTPException(404, "自动化脚本不存在")
+    d = row(s, "id", "project_id", "case_id", "case_no", "title", "script", "gen_source",
+            "status", "last_run_at", "created_at", "updated_at")
+    runs = (db.query(wb.WbAutoRun).filter(wb.WbAutoRun.script_id == sid)
+            .order_by(wb.WbAutoRun.id.desc()).limit(20).all())
+    d["runs"] = [row(r, "id", "status", "total_count", "passed_count", "failed_count",
+                     "duration_ms", "created_at", "finished_at") for r in runs]
+    return d
+
+
+@router.put("/auto-scripts/{sid}")
+def update_auto_script(sid: int, body: AutoScriptBody, db: Session = Depends(get_db)):
+    """EX-M1 人工补全：保存脚本代码。"""
+    s = db.get(wb.WbAutoScript, sid)
+    if not s:
+        raise HTTPException(404, "自动化脚本不存在")
+    if body.title is not None:
+        s.title = body.title
+    if body.script is not None:
+        s.script = body.script
+        s.gen_source = "manual" if s.gen_source == "template" else s.gen_source
+    if body.status is not None:
+        s.status = body.status
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/auto-scripts/{sid}")
+def delete_auto_script(sid: int, db: Session = Depends(get_db)):
+    s = db.get(wb.WbAutoScript, sid)
+    if not s:
+        raise HTTPException(404, "自动化脚本不存在")
+    db.delete(s)  # runs 级联删除（附件文件保留在磁盘）
+    db.commit()
+    return {"ok": True}
+
+
+# ---------- 执行器（EX-M2：独立 pytest 子进程） ----------
+
+_RUN_TIMEOUT_S = 300
+
+
+def _collect_junit(xml_path: Path) -> dict:
+    """解析 junit xml：总数/通过/失败/错误。"""
+    import xml.etree.ElementTree as ET
+
+    total = passed = failed = 0
+    failed_names = []
+    try:
+        root = ET.parse(xml_path).getroot()
+        suites = [root] if root.tag == "testsuite" else root.iter("testsuite")
+        for su in suites:
+            total += int(su.get("tests", 0) or 0)
+            failed += int(su.get("failures", 0) or 0) + int(su.get("errors", 0) or 0)
+            for tc in su.iter("testcase"):
+                if tc.find("failure") is not None or tc.find("error") is not None:
+                    failed_names.append(f'{tc.get("classname","")}.{tc.get("name","")}')
+        passed = max(0, total - failed)
+    except Exception:
+        pass
+    return {"total": total, "passed": passed, "failed": failed, "failed_names": failed_names}
+
+
+def _run_auto_script_in_pool(run_id: int, script_id: int):
+    """后台线程：写脚本与产物目录 → pytest 子进程 → 解析结果 → 归档附件 → 日志留存。"""
+    from models.database import create_session
+
+    db = create_session()
+    artifacts_dir: Path | None = None
+    try:
+        s = db.get(wb.WbAutoScript, script_id)
+        run = db.get(wb.WbAutoRun, run_id)
+        if not s or not run:
+            return
+        # 必须绝对路径：pytest.ini 会让 rootdir 变为 base，相对路径参数会错位拼接
+        run_dir = (Path(get_upload_dir()).resolve() / "auto_runs" / str(run_id))
+        run_dir.mkdir(parents=True, exist_ok=True)
+        artifacts_dir = run_dir / "artifacts"
+        test_file = run_dir / f"test_auto_{script_id}.py"
+        test_file.write_text(s.script or "", encoding="utf-8")
+        junit = run_dir / "junit.xml"
+
+        cmd = [
+            sys.executable, "-m", "pytest", str(test_file), "-v", "--tb=short",
+            f"--junitxml={junit}",
+            "--screenshot=only-on-failure", "--video=retain-on-failure",
+            "--tracing=retain-on-failure", f"--output={artifacts_dir}",
+            "-p", "no:cacheprovider",
+        ]
+        t0 = time.perf_counter()
+        try:
+            proc = subprocess.run(cmd, cwd=str(run_dir), capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=_RUN_TIMEOUT_S)
+            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            rc = proc.returncode
+        except subprocess.TimeoutExpired as ex:
+            out = (ex.stdout or "") if isinstance(ex.stdout, str) else ""
+            out += "\n[执行超时：超过 300 秒已被终止]"
+            rc = -9
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+
+        # 输出只保留尾部 15000 字符（AI 分析与展示用）
+        out_tail = out[-15000:]
+        stats = _collect_junit(junit) if junit.exists() else {"total": 0, "passed": 0, "failed": 0, "failed_names": []}
+        if stats["total"] == 0 and rc not in (0,):
+            status = "error"  # 脚本语法错误/收集失败等
+        elif stats["failed"] or rc not in (0,):
+            status = "failed"
+        else:
+            status = "passed"
+
+        run.status = status
+        run.duration_ms = duration_ms
+        run.total_count = stats["total"]
+        run.passed_count = stats["passed"]
+        run.failed_count = stats["failed"]
+        run.output = out_tail
+        run.finished_at = func.now()
+        s.last_run_at = func.now()
+        db.flush()
+
+        # L-04 附件留存：截图/Trace/视频/报告随执行记录归档（附件表挂载）
+        att_count = 0
+        if artifacts_dir and artifacts_dir.exists():
+            for f in sorted(artifacts_dir.rglob("*")):
+                if f.is_file() and f.stat().st_size > 0 and f.stat().st_size <= 50 * 1024 * 1024:
+                    db.add(wb.WbAttachment(
+                        owner_type="auto_run", owner_id=run_id,
+                        file_name=f.name, file_path=str(f),
+                        file_size=f.stat().st_size,
+                        mime_type={".png": "image/png", ".webm": "video/webm", ".zip": "application/zip",
+                                   ".xml": "text/xml"}.get(f.suffix, "application/octet-stream"),
+                    ))
+                    att_count += 1
+        db.flush()
+
+        # 日志留存：执行摘要进日志管理（log_type=automation）
+        db.add(wb.WbTestLog(
+            project_id=run.project_id, log_type="automation",
+            title=f"自动化执行：{s.title}（{status}）",
+            content=json.dumps({
+                "run_id": run.id, "script_id": s.id, "status": status,
+                "total": stats["total"], "passed": stats["passed"], "failed": stats["failed"],
+                "failed_names": stats["failed_names"], "duration_ms": duration_ms,
+                "artifacts": att_count, "output_tail": out_tail[-2000:],
+            }, ensure_ascii=False),
+        ))
+        db.commit()
+    except Exception as ex:
+        try:
+            db.rollback()
+            run = db.get(wb.WbAutoRun, run_id)
+            if run:
+                run.status, run.output, run.finished_at = "error", f"执行器异常：{ex}", func.now()
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+@router.post("/auto-scripts/{sid}/run")
+def run_auto_script(sid: int, background: BackgroundTasks, db: Session = Depends(get_db)):
+    s = db.get(wb.WbAutoScript, sid)
+    if not s:
+        raise HTTPException(404, "自动化脚本不存在")
+    if not (s.script or "").strip():
+        raise HTTPException(400, "脚本为空，请先补全")
+    run = wb.WbAutoRun(script_id=s.id, project_id=s.project_id, status="running")
+    db.add(run)
+    db.flush()
+    run_id = run.id
+    db.commit()
+    background.add_task(_run_auto_script_in_pool, run_id, sid)
+    return {"run_id": run_id}
+
+
+@router.get("/auto-runs")
+def list_auto_runs(project_id: int, db: Session = Depends(get_db)):
+    rows = (db.query(wb.WbAutoRun, wb.WbAutoScript)
+            .join(wb.WbAutoScript, wb.WbAutoRun.script_id == wb.WbAutoScript.id)
+            .filter(wb.WbAutoRun.project_id == project_id)
+            .order_by(wb.WbAutoRun.id.desc()).limit(100).all())
+    return [{**row(r, "id", "script_id", "status", "duration_ms", "total_count", "passed_count",
+                   "failed_count", "analyzed", "created_at", "finished_at"),
+             "script_title": s.title, "case_no": s.case_no} for r, s in rows]
+
+
+@router.get("/auto-runs/{rid}")
+def get_auto_run(rid: int, db: Session = Depends(get_db)):
+    r = db.get(wb.WbAutoRun, rid)
+    if not r:
+        raise HTTPException(404, "执行记录不存在")
+    s = db.get(wb.WbAutoScript, r.script_id)
+    d = row(r, "id", "script_id", "status", "duration_ms", "total_count", "passed_count",
+            "failed_count", "output", "analysis", "analyzed", "created_at", "finished_at")
+    d["script_title"] = s.title if s else ""
+    atts = db.query(wb.WbAttachment).filter(
+        wb.WbAttachment.owner_type == "auto_run", wb.WbAttachment.owner_id == rid).all()
+    d["attachments"] = [row(a, "id", "file_name", "file_size", "mime_type", "uploaded_at") for a in atts]
+    return d
+
+
+@router.post("/auto-runs/{rid}/analyze")
+def analyze_auto_run(rid: int, db: Session = Depends(get_db)):
+    """EX-M3：AI 失败分析——读取 pytest 输出，给出原因与修复建议。"""
+    r = db.get(wb.WbAutoRun, rid)
+    if not r:
+        raise HTTPException(404, "执行记录不存在")
+    if r.status == "passed":
+        raise HTTPException(400, "执行已通过，无需失败分析")
+    s = db.get(wb.WbAutoScript, r.script_id)
+    system = (
+        "你是资深 Playwright 自动化测试专家。分析失败的 pytest 测试输出，"
+        "输出：1) 失败原因（逐条，引用关键报错行）；2) 修复建议（具体到选择器/等待/环境层面）；"
+        "3) 是否疑似环境问题（目标服务不可用/超时）。用中文，条理化，不超过 400 字。"
+    )
+    user = (f"脚本标题：{s.title if s else ''}\n脚本代码：\n{(s.script if s else '')[:4000]}\n\n"
+            f"pytest 输出：\n{r.output or '（无输出）'}")
+    text = _call_chat_llm(db, "auto_fail_analysis", system, user)
+    r.analysis, r.analyzed = text, 1
+    db.commit()
+    return {"analysis": text}
 
 
 # ================= 附件 =================

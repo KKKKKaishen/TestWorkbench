@@ -340,6 +340,41 @@ class WbRegressionSchedule(Base):
     created_at = Column(DateTime, default=func.now())
 
 
+class WbAutoScript(Base):
+    """自动化脚本（EX-M1）：pytest + Playwright，AI 生成骨架后人工补全。"""
+    __tablename__ = "wb_auto_scripts"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    project_id = Column(BigInteger, ForeignKey("wb_projects.id"), nullable=False, index=True)
+    case_id = Column(BigInteger, ForeignKey("wb_test_cases.id", ondelete="SET NULL"), index=True)
+    case_no = Column(String(50))  # 用例编号快照（用例删除后仍可溯源）
+    title = Column(String(200), nullable=False)
+    script = Column(LongText, nullable=False, default="")
+    gen_source = Column(String(20), nullable=False, default="ai")  # ai / template / manual
+    status = Column(String(20), nullable=False, default="draft")  # draft / ready
+    last_run_at = Column(DateTime)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class WbAutoRun(Base):
+    """自动化执行记录（EX-M2）：独立 pytest 子进程执行，产物归档 uploads/auto_runs/{id}。"""
+    __tablename__ = "wb_auto_runs"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    script_id = Column(BigInteger, ForeignKey("wb_auto_scripts.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id = Column(BigInteger, nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="running")  # running/passed/failed/error
+    duration_ms = Column(Integer)
+    total_count = Column(Integer, nullable=False, default=0)
+    passed_count = Column(Integer, nullable=False, default=0)
+    failed_count = Column(Integer, nullable=False, default=0)
+    output = Column(LongText)  # pytest 输出尾部（失败分析/展示用）
+    analysis = Column(LongText)  # EX-M3 AI 失败分析结果
+    analyzed = Column(Integer, nullable=False, default=0)
+    finished_at = Column(DateTime)
+    created_at = Column(DateTime, default=func.now())
+    __table_args__ = (Index("idx_arun_project_time", "project_id", "created_at"),)
+
+
 class WbReport(Base):
     __tablename__ = "wb_reports"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
