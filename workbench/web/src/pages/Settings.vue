@@ -3,14 +3,23 @@
     <div class="page-title">设置</div>
 
     <div class="card mb16">
-      <div class="sec-title">AI 模型（DeepSeek / GLM / Qwen）</div>
-      <div class="muted mb12">三家接口均预留，key 加密存储（界面打码显示）。填好后点「测试连通」验证。</div>
+      <div class="sec-title">AI 模型（本地大模型 / DeepSeek / GLM / Qwen）</div>
+      <div class="muted mb12">
+        本地大模型：填 OpenAI 兼容端点即可离线使用（Ollama 默认 http://127.0.0.1:11434/v1，LM Studio 默认 http://127.0.0.1:1234/v1）；
+        云厂商 key 加密存储（界面打码）。配置后点「测试连通」验证。
+      </div>
       <el-table :data="aiSettings" size="small">
-        <el-table-column prop="setting_key" label="配置项" width="220" />
+        <el-table-column label="配置项" width="260">
+          <template #default="{ row }">
+            <div>{{ row.setting_key }}</div>
+            <div class="muted" style="font-size:12px">{{ row.description }}</div>
+          </template>
+        </el-table-column>
         <el-table-column label="值" min-width="200">
           <template #default="{ row }">
             <el-input v-if="editing === row.setting_key" v-model="editValue" size="small"
-                      :placeholder="row.is_secret ? '粘贴 API key' : ''" show-password />
+                      :placeholder="row.is_secret ? '粘贴 API key' : (row.setting_key === 'ai.local.base_url' ? 'http://127.0.0.1:11434/v1' : '模型名')"
+                      :show-password="!!row.is_secret" />
             <span v-else>{{ row.has_value ? (row.is_secret ? '******' : row.setting_value) : '未配置' }}</span>
           </template>
         </el-table-column>
@@ -22,7 +31,8 @@
             </template>
             <template v-else>
               <el-button size="small" link type="primary" @click="startEdit(row)">编辑</el-button>
-              <el-button v-if="row.has_value" size="small" link :loading="testing === row.setting_key"
+              <el-button size="small" link :loading="testing === row.setting_key"
+                         :disabled="row.setting_key === 'ai.local.api_key'"
                          @click="testConn(row)">测试连通</el-button>
             </template>
           </template>
@@ -86,12 +96,18 @@ onMounted(load)
 
 async function load() {
   const items = await get('/wb/settings?group=ai_model')
-  // 三家固定展示，未落库的补占位行
-  const keys = ['ai.deepseek.api_key', 'ai.glm.api_key', 'ai.qwen.api_key']
-  aiSettings.value = keys.map(k => {
+  // 固定展示行：本地大模型三项 + 三家云厂商 key；未落库的补占位行
+  const defs = [
+    { k: 'ai.local.base_url', secret: 0, desc: '本地模型服务端点（Ollama/LM Studio/任意 OpenAI 兼容服务）' },
+    { k: 'ai.local.model', secret: 0, desc: '模型名（如 qwen2.5:7b，留空默认 qwen2.5:7b）' },
+    { k: 'ai.local.api_key', secret: 1, desc: '本地模型通常无需 key，留空即可' },
+    { k: 'ai.deepseek.api_key', secret: 1, desc: 'DeepSeek API key' },
+    { k: 'ai.glm.api_key', secret: 1, desc: '智谱 GLM API key' },
+    { k: 'ai.qwen.api_key', secret: 1, desc: '通义千问 API key' },
+  ]
+  aiSettings.value = defs.map(({ k, secret, desc }) => {
     const found = items.find(i => i.setting_key === k)
-    const provider = k.split('.')[1]
-    return found || { setting_key: k, setting_group: 'ai_model', setting_value: '', is_secret: 1, has_value: false, description: `${provider} API key` }
+    return found || { setting_key: k, setting_group: 'ai_model', setting_value: '', is_secret: secret, has_value: false, description: desc }
   })
   try {
     usage.value = await get('/wb/ai-usage-stats')

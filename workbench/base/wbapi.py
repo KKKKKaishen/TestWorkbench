@@ -3,6 +3,7 @@
 单机单用户使用，不做鉴权。所有端点读写 Workbench 库的 wb_ 表。
 """
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from sqlalchemy.orm import Session
 import wbmodels as wb
 from config import get_upload_dir
 from models.database import get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/wb", tags=["workbench"])
 
@@ -2412,9 +2415,9 @@ def start_regression_scheduler():
                         db.commit()
                     except Exception as ex:
                         db.rollback()
-                        print(f"[regression-scheduler] 计划 {sch.id} 触发失败: {ex}")
+                        logger.exception("回归计划 %s 触发失败", sch.id)
             except Exception as ex:
-                print(f"[regression-scheduler] 调度循环异常: {ex}")
+                logger.exception("回归调度循环异常: %s", ex)
             finally:
                 if db:
                     try:
@@ -2494,17 +2497,34 @@ _AI_PROVIDERS = {
 }
 
 
+def _local_llm_conf(db: Session) -> tuple[str, str, str] | None:
+    """本地大模型（OpenAI 兼容端点）配置：base_url 必填，model 默认 qwen2.5:7b。
+    返回 (base_url, model, api_key)；未配置 base_url 返回 None。"""
+    base_url = (_decrypt_wb_secret(db, "ai.local.base_url") or "").strip()
+    if not base_url:
+        return None
+    model = (_decrypt_wb_secret(db, "ai.local.model") or "").strip() or "qwen2.5:7b"
+    api_key = (_decrypt_wb_secret(db, "ai.local.api_key") or "").strip() or "local"
+    return base_url.rstrip("/"), model, api_key
+
+
 def _call_chat_llm(db: Session, scene: str, system: str, user: str, max_tokens: int = 3000) -> str:
     """通用 AI 调用（EX-M1 骨架生成 / EX-M3 失败分析共用）。
-    依序尝试设置页已配置 key 的 provider；全未配置抛 400 提示。"""
+    优先本地大模型（OpenAI 兼容端点，离线可用），再依序尝试云厂商；全未配置抛 400 提示。"""
     import urllib.error
     import urllib.request
 
-    last_err = None
+    providers: list[tuple[str, str, str, str]] = []  # (provider, base_url, model, api_key)
+    local = _local_llm_conf(db)
+    if local:
+        providers.append(("local", local[0], local[1], local[2]))
     for provider, (base_url, model) in _AI_PROVIDERS.items():
         key = _decrypt_wb_secret(db, f"ai.{provider}.api_key")
-        if not key:
-            continue
+        if key:
+            providers.append((provider, base_url, model, key))
+
+    last_err = None
+    for provider, base_url, model, key in providers:
         start = time.time()
         try:
             req = urllib.request.Request(
@@ -2530,7 +2550,7 @@ def _call_chat_llm(db: Session, scene: str, system: str, user: str, max_tokens: 
         db.add(wb.WbAiCallLog(scene=scene, model_name=model, success=0, error_msg=last_err[:500]))
         db.commit()
     if last_err is None:
-        raise HTTPException(400, "AI 能力未配置：请先在「设置 → AI 模型」中配置任一模型的 API key")
+        raise HTTPException(400, "AI 能力未配置：请先在「设置 → AI 模型」中配置本地大模型端点或任一云模型 API key")
     raise HTTPException(400, f"AI 调用失败：{last_err}")
 
 
@@ -2750,8 +2770,8 @@ def _run_auto_script_in_pool(run_id: int, script_id: int):
         test_file.write_text(s.script or "", encoding="utf-8")
         junit = run_dir / "junit.xml"
 
-        cmd = [
-            sys.executable, "-m", "pytest", str(test_file), "-v", "--tb=short",
+        run_args = [
+            str(test_file), "-v", "--tb=short", "-p", "pytest_playwright",
             f"--junitxml={junit}",
             "--screenshot=only-on-failure", "--video=retain-on-failure",
             "--tracing=retain-on-failure", f"--output={artifacts_dir}",
@@ -2759,10 +2779,29 @@ def _run_auto_script_in_pool(run_id: int, script_id: int):
         ]
         t0 = time.perf_counter()
         try:
-            proc = subprocess.run(cmd, cwd=str(run_dir), capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=_RUN_TIMEOUT_S)
-            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-            rc = proc.returncode
+            if getattr(sys, "frozen", False):
+                # 冻结环境无独立 python.exe：server.exe 自调用 --run-pytest 子进程模式
+                payload = run_dir / "pytest_args.json"
+                payload.write_text(json.dumps(run_args), encoding="utf-8")
+                result_file = run_dir / "pytest_result.json"
+                proc = subprocess.run(
+                    [sys.executable, "--run-pytest", str(payload), str(result_file)],
+                    cwd=str(run_dir), capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=_RUN_TIMEOUT_S)
+                if result_file.exists():
+                    r = json.loads(result_file.read_text(encoding="utf-8"))
+                    out = (r.get("stdout") or "") + "\n" + (r.get("stderr") or "")
+                    rc = int(r.get("rc") or 0)
+                else:  # 子进程异常退出且未写结果
+                    out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                    rc = proc.returncode if proc.returncode is not None else -1
+            else:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "pytest", *run_args],
+                    cwd=str(run_dir), capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=_RUN_TIMEOUT_S)
+                out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                rc = proc.returncode
         except subprocess.TimeoutExpired as ex:
             out = (ex.stdout or "") if isinstance(ex.stdout, str) else ""
             out += "\n[执行超时：超过 300 秒已被终止]"
@@ -2817,6 +2856,7 @@ def _run_auto_script_in_pool(run_id: int, script_id: int):
         ))
         db.commit()
     except Exception as ex:
+        logger.exception("自动化执行 %s 异常", run_id)
         try:
             db.rollback()
             run = db.get(wb.WbAutoRun, run_id)
@@ -2827,6 +2867,17 @@ def _run_auto_script_in_pool(run_id: int, script_id: int):
             pass
     finally:
         db.close()
+
+
+@router.post("/client-errors")
+def report_client_error(body: dict):
+    """前端 JS 错误上报（window.onerror / unhandledrejection）：落入 workbench.log。"""
+    try:
+        payload = json.dumps(body, ensure_ascii=False)[:2000]
+    except Exception:
+        payload = str(body)[:2000]
+    logging.getLogger("frontend").error("前端错误: %s", payload)
+    return {"ok": True}
 
 
 @router.post("/auto-scripts/{sid}/run")
@@ -3264,24 +3315,32 @@ def reveal_setting(setting_key: str, db: Session = Depends(get_db)):
 
 @router.post("/settings/test-model")
 def test_model(provider: str = "deepseek", db: Session = Depends(get_db)):
-    """用库里配置的 key 做一次最小连通性测试。"""
-    key_row = db.query(wb.WbSetting).filter(
-        wb.WbSetting.setting_key == f"ai.{provider}.api_key").first()
-    if not key_row or not key_row.setting_value:
-        raise HTTPException(400, f"{provider} 的 API key 未配置")
-    key = key_row.setting_value
-    if key_row.is_secret:
-        key = _secret_cipher().decrypt(key.encode()).decode()
-    base_urls = {"deepseek": "https://api.deepseek.com",
-                 "glm": "https://open.bigmodel.cn/api/paas/v4",
-                 "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1"}
-    models = {"deepseek": "deepseek-chat", "glm": "glm-4-flash", "qwen": "qwen-turbo"}
-    url = base_urls[provider]
+    """用库里配置的 key 做一次最小连通性测试；provider=local 走本地 OpenAI 兼容端点。"""
     import urllib.error
     import urllib.request
+
+    if provider == "local":
+        conf = _local_llm_conf(db)
+        if not conf:
+            raise HTTPException(400, "本地大模型未配置：请先填写服务端点（如 http://127.0.0.1:11434/v1）")
+        url, model, key = conf
+    else:
+        key_row = db.query(wb.WbSetting).filter(
+            wb.WbSetting.setting_key == f"ai.{provider}.api_key").first()
+        if not key_row or not key_row.setting_value:
+            raise HTTPException(400, f"{provider} 的 API key 未配置")
+        key = key_row.setting_value
+        if key_row.is_secret:
+            key = _secret_cipher().decrypt(key.encode()).decode()
+        base_urls = {"deepseek": "https://api.deepseek.com",
+                     "glm": "https://open.bigmodel.cn/api/paas/v4",
+                     "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1"}
+        models = {"deepseek": "deepseek-chat", "glm": "glm-4-flash", "qwen": "qwen-turbo"}
+        url = base_urls[provider]
+        model = models[provider]
     req = urllib.request.Request(
         f"{url}/chat/completions",
-        data=json.dumps({"model": models[provider], "messages": [{"role": "user", "content": "ping"}],
+        data=json.dumps({"model": model, "messages": [{"role": "user", "content": "ping"}],
                          "max_tokens": 5}).encode(),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
@@ -3289,17 +3348,20 @@ def test_model(provider: str = "deepseek", db: Session = Depends(get_db)):
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             body = json.loads(resp.read().decode())
-        db.add(wb.WbAiCallLog(scene="connectivity_test", model_name=models[provider],
+        db.add(wb.WbAiCallLog(scene="connectivity_test", model_name=model,
                               duration_ms=int((time.time() - start) * 1000), success=1))
         db.commit()
         return {"ok": True, "model": body.get("model"), "latency_ms": int((time.time() - start) * 1000)}
     except urllib.error.HTTPError as e:
         detail = e.read().decode()[:200]
-        db.add(wb.WbAiCallLog(scene="connectivity_test", model_name=models[provider],
+        db.add(wb.WbAiCallLog(scene="connectivity_test", model_name=model,
                               success=0, error_msg=f"HTTP {e.code}: {detail}"))
         db.commit()
         raise HTTPException(400, f"HTTP {e.code}: {detail}")
     except Exception as e:
+        db.add(wb.WbAiCallLog(scene="connectivity_test", model_name=model,
+                              success=0, error_msg=str(e)[:500]))
+        db.commit()
         raise HTTPException(400, f"连通失败: {e}")
 
 
