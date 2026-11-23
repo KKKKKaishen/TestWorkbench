@@ -50,7 +50,7 @@ IS_CLOUD = (os.getenv("WB_SYNC_ROLE") or "").strip().lower() == "cloud"
 # 不参与同步的表：同步机制自身 + 每机器本地噪声 + 挂在底座文件表上的分块
 _EXCLUDED = {
     "wb_sync_rowver", "wb_sync_state", "wb_sync_files", "wb_sync_apply_flag",
-    "wb_ai_call_logs", "wb_kb_chunks",
+    "wb_ai_call_logs", "wb_kb_chunks", "wb_user",
 }
 ID_STRIDE = 1_000_000_000  # 每客户端 ID 区间宽度
 PUSH_BATCH = 200
@@ -118,6 +118,9 @@ def _is_mysql(db) -> bool:
 
 
 def _state_set(db, key: str, value: str | None) -> None:
+    if value is None:
+        db.execute(text("DELETE FROM wb_sync_state WHERE state_key = :k"), {"k": key})
+        return
     if _is_mysql(db):
         db.execute(
             text("INSERT INTO wb_sync_state(state_key, state_value) VALUES(:k, :v) "
@@ -172,6 +175,8 @@ def status_snapshot() -> dict:
             "cloud_url": _state_get(db, "cloud_url") or "",
             "client_id": _state_get(db, "client_id") or "",
             "client_name": _state_get(db, "client_name") or "",
+            "account": _state_get(db, "account") or "",
+            "logged_in": bool(_state_get(db, "account")),
             "ordinal": int(_state_get(db, "ordinal") or 0),
             "pending_push": int(pending),
             "online": bool(_status["online"]),
@@ -628,7 +633,8 @@ def _remap_existing_data(offset: int) -> None:
     logger.info("存量数据已平移到客户端区间 +%d", offset)
 
 
-def enable_sync(cloud_url: str, token: str, client_name: str) -> dict:
+def enable_sync(cloud_url: str, token: str, client_name: str,
+                username: str | None = None) -> dict:
     """启用同步：注册 → 存量平移（一次性）→ 初始化 ID 序列 → 装触发器 → 启线程。"""
     global _ACTIVE
     cloud_url = (cloud_url or "").strip().rstrip("/")
@@ -640,6 +646,10 @@ def enable_sync(cloud_url: str, token: str, client_name: str) -> dict:
     for k, v in {"cloud_url": cloud_url, "token": token,
                  "client_name": client_name or "客户端"}.items():
         set_state(k, v)
+    if username:
+        set_state("account", username)
+    else:
+        set_state("account", None)
 
     reg = _http_json("POST", cloud_url + "/wb/sync/register",
                      {"client_name": client_name or "客户端"})
@@ -678,6 +688,116 @@ def disable_sync() -> dict:
     set_state("enabled", "0")
     _stop_worker()
     return status_snapshot()
+
+
+# 账户会话（云同步登录/退出）---------------------------------------------------
+
+def _uninstall_triggers() -> None:
+    """卸载行版本触发器（退出登录时防止清库动作被登记成墓碑）。"""
+    eng = get_engine()
+    with eng.begin() as conn:
+        for tname in _synced_tables():
+            for mode in ("i", "u", "d"):
+                conn.execute(text(f"DROP TRIGGER IF EXISTS wb_sync_{mode}_{tname}"))
+    logger.info("同步触发器已卸载")
+
+
+def local_business_count() -> int:
+    """本地业务行总数。未登录时 >0 表示存在「本地临时数据」。"""
+    eng = get_engine()
+    with eng.connect() as conn:
+        total = 0
+        for t in _synced_tables().values():
+            total += conn.execute(text(f"SELECT COUNT(*) FROM `{t.name}`")).scalar() or 0
+        return total
+
+
+def _temp_backup_path() -> Path:
+    return Path(get_upload_dir()).resolve().parent / "temp_backup.db"
+
+
+def stash_temp_data() -> bool:
+    """把本地临时数据整体转入备份库隐藏（登录选「不归纳」时调用）。
+
+    复制到备份库后从主库删除（防触发器干扰：此时同步尚未启用、无触发器）；
+    备份库只保留最近一次；返回是否存在临时数据（已转入）。"""
+    if local_business_count() == 0:
+        return False
+    from sqlalchemy import create_engine as _ce
+    backup = _temp_backup_path()
+    if backup.exists():
+        backup.unlink()
+    tables = list(_synced_tables().values())  # 已按外键依赖排序（父表在前）
+    beng = _ce(f"sqlite:///{backup}")
+    wb.Base.metadata.create_all(beng, tables=tables)
+    eng = get_engine()
+    with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as main, \
+            beng.begin() as dst:
+        # 先复制（父表在前），再从主库删除（子表在前）
+        for t in tables:
+            rows = main.execute(t.select()).fetchall()
+            if rows:
+                dst.execute(t.insert(), [dict(r._mapping) for r in rows])
+        for t in reversed(tables):
+            main.execute(text(f"DELETE FROM `{t.name}`"))
+        main.execute(text("DELETE FROM wb_sync_rowver"))
+    beng.dispose()
+    logger.info("本地临时数据已转入备份库并从主库移除：%s", backup)
+    return True
+
+
+def _restore_temp_data() -> bool:
+    """退出登录时把备份库中的临时数据恢复到主库。返回是否恢复了数据。"""
+    backup = _temp_backup_path()
+    if not backup.exists():
+        return False
+    from sqlalchemy import create_engine as _ce
+    tables = list(_synced_tables().values())
+    beng = _ce(f"sqlite:///{backup}")
+    eng = get_engine()
+    try:
+        with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as dst, \
+                beng.connect() as src:
+            if dst.dialect.name == "sqlite":
+                dst.execute(text("PRAGMA foreign_keys=OFF"))
+            for t in reversed(tables):
+                dst.execute(text(f"DELETE FROM `{t.name}`"))
+            for t in tables:
+                rows = src.execute(t.select()).fetchall()
+                if rows:
+                    dst.execute(t.insert(), [dict(r._mapping) for r in rows])
+        return True
+    finally:
+        beng.dispose()
+        try:
+            backup.unlink()  # 恢复后删除备份
+        except OSError:
+            pass
+
+
+def logout_and_clear() -> dict:
+    """退出登录：停同步 → 卸触发器 → 清空账户数据与同步状态 → 恢复本地临时数据（若有）。
+
+    清空账户数据后 UI 自然不再展示该账号内容（数据仍在云端，重新登录即拉回）。"""
+    global _ACTIVE
+    disable_sync()
+    _ACTIVE = False
+    _uninstall_triggers()
+    eng = get_engine()
+    with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        if eng.dialect.name == "sqlite":
+            conn.execute(text("PRAGMA foreign_keys=OFF"))
+        else:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+        for t in reversed(list(_synced_tables().values())):
+            conn.execute(text(f"DELETE FROM `{t.name}`"))
+        for extra in ("wb_sync_rowver", "wb_sync_files", "wb_sync_state"):
+            conn.execute(text(f"DELETE FROM `{extra}`"))
+    restored = _restore_temp_data()
+    _status.update({"online": False, "last_sync_at": None,
+                    "last_error": None, "syncing": False})
+    logger.info("已退出登录并清空本地账户数据（恢复临时数据：%s）", restored)
+    return {"ok": True, "restored_temp": restored}
 
 
 # 推拉核心 ---------------------------------------------------------------------

@@ -474,3 +474,38 @@ class WbSyncFile(Base):
     sha256 = Column(String(64), nullable=False)
     size = Column(BigInteger, nullable=False, default=0)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class WbUser(Base):
+    """云同步账户（只在云端维护，不参与行同步）。
+
+    password_hash 格式：pbkdf2$<salt hex>$<dk hex>（pbkdf2_hmac-sha256, 120k 轮）；
+    sync_token 为每账户签发的同步访问令牌（登录后客户端凭它与云端同步）。"""
+    __tablename__ = "wb_user"
+    id = Column(WbPK, primary_key=True, autoincrement=True)
+    username = Column(String(50), nullable=False, unique=True)
+    password_hash = Column(String(200), nullable=False)
+    display_name = Column(String(100))
+    sync_token = Column(String(64), nullable=False, unique=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class WbAiProvider(Base):
+    """AI 模型提供商配置（随行同步，跨机共享）。
+
+    api_key_enc 用确定性密钥（_provider_cipher）加密：各机器派生出同一密钥，
+    配置同步到其他电脑后仍可解密使用。protocol: openai_chat / openai_responses / anthropic。"""
+    __tablename__ = "wb_ai_providers"
+    id = Column(WbPK, primary_key=True, autoincrement=True)
+    provider_id = Column(String(60), nullable=False, unique=True)
+    display_name = Column(String(100), nullable=False)
+    kind = Column(String(20), nullable=False, default="custom")      # builtin / custom
+    catalog_slug = Column(String(60))                                # 内置目录 slug（kind=builtin）
+    protocol = Column(String(30), nullable=False, default="openai_chat")
+    base_url = Column(String(300))
+    api_key_enc = Column(Text)                                       # Fernet 密文
+    models = Column(JSON, default=list)                              # 模型目录（模型 ID 列表）
+    enabled = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())

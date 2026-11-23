@@ -3856,13 +3856,115 @@ def sync_now():
     return {"ok": True}
 
 
+# ---- 账户密码登录（云同步）---------------------------------------------------
+
+def _hash_password(password: str, salt: bytes | None = None) -> str:
+    import hashlib as _hs
+    salt = salt or _uuid.uuid4().bytes
+    dk = _hs.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
+    return f"pbkdf2${salt.hex()}${dk.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        _, salt_hex, _ = stored.split("$", 2)
+        return _hash_password(password, bytes.fromhex(salt_hex)) == stored
+    except Exception:
+        return False
+
+
+def _ensure_default_user(db: Session) -> wb.WbUser:
+    """账户表为空时播种默认账户（可用环境变量覆盖用户名/密码）。"""
+    username = (_os.getenv("WB_DEFAULT_USER") or "cyu").strip()
+    password = _os.getenv("WB_DEFAULT_PASSWORD") or "xx19980304cky"
+    u = wb.WbUser(username=username, display_name=username,
+                  password_hash=_hash_password(password),
+                  sync_token=(_uuid.uuid4().hex + _uuid.uuid4().hex))
+    db.add(u)
+    db.commit()
+    logger.info("已播种默认云同步账户：%s", username)
+    return u
+
+
+class AuthLoginBody(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/auth/login")
+def auth_login(body: AuthLoginBody, db: Session = Depends(get_db)):
+    """账户密码登录：校验通过后签发该账户的同步令牌（客户端凭它与云端同步）。"""
+    if not db.query(wb.WbUser).count():
+        _ensure_default_user(db)
+    u = db.query(wb.WbUser).filter(wb.WbUser.username == body.username.strip()).first()
+    if not u or not _verify_password(body.password, u.password_hash):
+        raise HTTPException(401, "用户名或密码错误")
+    return {"ok": True, "username": u.username, "display_name": u.display_name,
+            "sync_token": u.sync_token}
+
+
+class SyncLoginBody(BaseModel):
+    cloud_url: str
+    username: str
+    password: str
+    client_name: str = ""
+    merge_local: bool = True
+
+
+@router.post("/sync/login")
+def sync_login(body: SyncLoginBody):
+    """账户密码登录并启用云同步。
+
+    merge_local=True：本地临时数据平移迁移进账户（推送到云端，登录时前端先确认）；
+    merge_local=False：本地临时数据转入备份库隐藏，登录后仅展示云端数据，
+    退出登录时恢复展示本地临时数据。"""
+    url = body.cloud_url.strip().rstrip("/")
+    try:
+        r = wbsync._http_json("POST", url + "/wb/auth/login",
+                              {"username": body.username, "password": body.password})
+    except Exception as ex:
+        raise HTTPException(400, f"登录失败：{ex}")
+    if not body.merge_local and wbsync.local_business_count() > 0:
+        wbsync.stash_temp_data()
+    # 归纳场景：重置 remapped 让 enable_sync 重新平移迁移本地存量（含临时数据）
+    wbsync.set_state("remapped", None)
+    snap = wbsync.enable_sync(url, r["sync_token"], body.client_name,
+                              username=r["username"])
+    return {"ok": True, "username": r["username"], **snap}
+
+
+@router.post("/sync/logout")
+def sync_logout():
+    """退出登录：清空本地账户数据（云端保留），恢复本地临时数据（若有）。"""
+    try:
+        return wbsync.logout_and_clear()
+    except Exception as ex:
+        raise HTTPException(400, f"退出登录失败：{ex}")
+
+
+@router.get("/sync/temp-info")
+def sync_temp_info():
+    """未登录态下本地临时数据行数（登录弹窗用）。"""
+    try:
+        return {"rows": wbsync.local_business_count(),
+                "has_backup": wbsync._temp_backup_path().exists()}
+    except Exception:
+        return {"rows": 0, "has_backup": False}
+
+
 def _check_sync_token(x_sync_token: str = _Header(default="")):
-    """服务器侧推拉端点鉴权：WB_SYNC_TOKEN 未配置 = 云同步未启用。"""
+    """服务器侧推拉端点鉴权：接受主令牌（WB_SYNC_TOKEN）或任一账户令牌（wb_user.sync_token）。"""
     expected = (_os.getenv("WB_SYNC_TOKEN") or "").strip()
+    if expected and x_sync_token == expected:
+        return
+    if x_sync_token:
+        from models.database import create_session
+        with create_session() as db:
+            if db.query(wb.WbUser).filter(wb.WbUser.sync_token == x_sync_token).first():
+                return
     if not expected:
         raise HTTPException(503, "服务器未启用云同步（未配置 WB_SYNC_TOKEN）")
-    if x_sync_token != expected:
-        raise HTTPException(401, "同步访问令牌无效")
+    raise HTTPException(401, "同步访问令牌无效")
 
 
 @router.get("/sync/ping")
@@ -4024,3 +4126,287 @@ def sync_files_download(path: str, _t: None = _Depends(_check_sync_token)):
     if not target.is_file():
         raise HTTPException(404, "文件不存在")
     return _Response(content=target.read_bytes(), media_type="application/octet-stream")
+
+# ================= AI 模型提供商（新增模型提供商弹窗） ========================
+
+_AI_PROVIDER_PROTOCOLS = {
+    "openai_chat": "OpenAI Chat Completions",
+    "openai_responses": "OpenAI Responses",
+    "anthropic": "Anthropic Messages",
+}
+
+_AI_PROVIDER_CATALOG = [
+    {"slug": "openai", "name": "OpenAI", "protocol": "openai_chat",
+     "base_url": "https://api.openai.com/v1",
+     "models": ["gpt-4o", "gpt-4o-mini", "o4-mini"],
+     "env_key": "OPENAI_API_KEY", "addr_hint": ""},
+    {"slug": "anthropic", "name": "Anthropic", "protocol": "anthropic",
+     "base_url": "https://api.anthropic.com",
+     "models": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
+     "env_key": "ANTHROPIC_API_KEY", "addr_hint": ""},
+    {"slug": "amazon-bedrock", "name": "Amazon Bedrock", "protocol": "openai_chat",
+     "base_url": "",
+     "models": ["anthropic.claude-sonnet-4-5", "amazon.nova-pro-v1"],
+     "env_key": "AWS_BEARER_TOKEN_BEDROCK", "addr_hint": "AWS_REGION, AWS_DEFAULT_REGION"},
+    {"slug": "deepseek", "name": "DeepSeek 深度求索", "protocol": "openai_chat",
+     "base_url": "https://api.deepseek.com",
+     "models": ["deepseek-chat", "deepseek-reasoner"],
+     "env_key": "DEEPSEEK_API_KEY", "addr_hint": ""},
+    {"slug": "kimi", "name": "Kimi (Moonshot)", "protocol": "openai_chat",
+     "base_url": "https://api.moonshot.cn/v1",
+     "models": ["kimi-k2-0905-preview", "moonshot-v1-128k"],
+     "env_key": "MOONSHOT_API_KEY", "addr_hint": ""},
+    {"slug": "glm", "name": "智谱 GLM", "protocol": "openai_chat",
+     "base_url": "https://open.bigmodel.cn/api/paas/v4",
+     "models": ["glm-4.6", "glm-4.5", "glm-4-flash"],
+     "env_key": "ZHIPUAI_API_KEY", "addr_hint": ""},
+    {"slug": "qwen", "name": "通义千问 Qwen", "protocol": "openai_chat",
+     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+     "models": ["qwen3-max", "qwen-plus", "qwen-turbo"],
+     "env_key": "DASHSCOPE_API_KEY", "addr_hint": ""},
+    {"slug": "openrouter", "name": "OpenRouter", "protocol": "openai_chat",
+     "base_url": "https://openrouter.ai/api/v1",
+     "models": [], "env_key": "OPENROUTER_API_KEY", "addr_hint": ""},
+    {"slug": "gemini", "name": "Google Gemini", "protocol": "openai_chat",
+     "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+     "models": ["gemini-2.5-pro", "gemini-2.5-flash"],
+     "env_key": "GEMINI_API_KEY", "addr_hint": ""},
+    {"slug": "ollama", "name": "Ollama（本地）", "protocol": "openai_chat",
+     "base_url": "http://127.0.0.1:11434/v1",
+     "models": [], "env_key": "", "addr_hint": ""},
+    {"slug": "lmstudio", "name": "LM Studio（本地）", "protocol": "openai_chat",
+     "base_url": "http://127.0.0.1:1234/v1",
+     "models": [], "env_key": "", "addr_hint": ""},
+]
+
+
+def _provider_cipher():
+    """提供商 api_key 加密：确定性密钥（各机器派生同一密钥，配置同步后仍可解密）。"""
+    import base64 as _b64
+    import hashlib as _hs
+    from cryptography.fernet import Fernet
+    key = _b64.urlsafe_b64encode(_hs.sha256(b"CyuWorkshop-AI-Provider-Key-v1").digest())
+    return Fernet(key)
+
+
+class AiProviderBody(BaseModel):
+    provider_id: str
+    display_name: str
+    kind: str = "custom"              # builtin / custom
+    catalog_slug: str | None = None
+    protocol: str = "openai_chat"
+    base_url: str | None = None
+    api_key: str | None = None        # 明文入参（加密存储，不回显）
+    models: list[str] = []
+    enabled: int = 1
+
+
+@router.get("/ai-providers/catalog")
+def ai_provider_catalog():
+    """内置提供商目录（前端下拉；含环境变量密钥检测提示）。"""
+    out = []
+    for c in _AI_PROVIDER_CATALOG:
+        c = dict(c)
+        env = c.get("env_key") or ""
+        c["env_key_detected"] = bool(env and _os.getenv(env, "").strip())
+        out.append(c)
+    return out
+
+
+@router.get("/ai-providers")
+def ai_provider_list(db: Session = Depends(get_db)):
+    rows = db.query(wb.WbAiProvider).order_by(wb.WbAiProvider.id).all()
+    return [{"id": r.id, "provider_id": r.provider_id, "display_name": r.display_name,
+             "kind": r.kind, "catalog_slug": r.catalog_slug, "protocol": r.protocol,
+             "protocol_label": _AI_PROVIDER_PROTOCOLS.get(r.protocol, r.protocol),
+             "base_url": r.base_url or "", "models": r.models or [],
+             "enabled": r.enabled, "has_api_key": bool(r.api_key_enc),
+             "created_at": str(r.created_at or "")} for r in rows]
+
+
+def _apply_provider_legacy_settings(db: Session, p) -> None:
+    """把提供商配置桥接进既有设置键，使测试连通/本地模型链路等旧功能立即可用。
+
+    - 内置提供商：写 ai.{slug}.api_key（与设置页既有行对应）
+    - 自定义 OpenAI 兼容端点：写 ai.local.*（对话/工作流的本地模型链路）"""
+    key_plain = None
+    if p.api_key_enc:
+        try:
+            key_plain = _provider_cipher().decrypt(p.api_key_enc.encode()).decode()
+        except Exception:
+            key_plain = None
+
+    def _up(k, v, secret=0, desc=""):
+        if not v:
+            return
+        enc = _secret_cipher().encrypt(v.encode()).decode() if secret else v
+        row = db.query(wb.WbSetting).filter(wb.WbSetting.setting_key == k).first()
+        if row:
+            row.setting_value = enc
+            row.is_secret = secret
+            if desc:
+                row.description = desc
+        else:
+            db.add(wb.WbSetting(setting_key=k, setting_group="ai_model",
+                                setting_value=enc, is_secret=secret, description=desc))
+
+    if p.kind == "builtin" and p.catalog_slug:
+        _up(f"ai.{p.catalog_slug}.api_key", key_plain, 1, f"{p.display_name} API key")
+    elif p.kind == "custom" and p.protocol in ("openai_chat", "openai_responses"):
+        _up("ai.local.base_url", p.base_url, 0, "AI 提供商端点（自定义模型 API）")
+        _up("ai.local.api_key", key_plain, 1, "AI 提供商密钥（自定义模型 API）")
+        if p.models:
+            _up("ai.local.model", p.models[0], 0, "AI 提供商默认模型")
+
+
+@router.post("/ai-providers")
+def ai_provider_create(body: AiProviderBody, db: Session = Depends(get_db)):
+    pid = (body.provider_id or "").strip()
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,58}", pid):
+        raise HTTPException(400, "Provider ID 需以小写字母开头，仅含小写字母/数字/连字符")
+    if db.query(wb.WbAiProvider).filter(wb.WbAiProvider.provider_id == pid).first():
+        raise HTTPException(400, f"Provider ID 已存在：{pid}")
+    if body.protocol not in _AI_PROVIDER_PROTOCOLS:
+        raise HTTPException(400, f"不支持的 API 协议：{body.protocol}")
+    if body.kind == "builtin" and not (body.base_url or "").strip():
+        cat = next((c for c in _AI_PROVIDER_CATALOG if c["slug"] == body.catalog_slug), None)
+        if not cat:
+            raise HTTPException(400, "内置提供商不存在")
+        if not (cat["base_url"] or "").strip():
+            raise HTTPException(400, f"{cat['name']} 需在自定义设置中填写 API 地址")
+    p = wb.WbAiProvider(
+        provider_id=pid, display_name=(body.display_name or pid).strip(),
+        kind=body.kind if body.kind in ("builtin", "custom") else "custom",
+        catalog_slug=body.catalog_slug,
+        protocol=body.protocol,
+        base_url=(body.base_url or "").strip() or None,
+        api_key_enc=(_provider_cipher().encrypt(body.api_key.encode()).decode()
+                     if body.api_key else None),
+        models=[m for m in (body.models or []) if m and m.strip()], enabled=body.enabled)
+    db.add(p)
+    db.commit()
+    _apply_provider_legacy_settings(db, p)
+    db.commit()
+    return {"ok": True, "id": p.id}
+
+
+@router.put("/ai-providers/{pid}")
+def ai_provider_update(pid: int, body: AiProviderBody, db: Session = Depends(get_db)):
+    p = db.get(wb.WbAiProvider, pid)
+    if not p:
+        raise HTTPException(404, "提供商不存在")
+    p.display_name = (body.display_name or p.display_name).strip()
+    p.protocol = body.protocol if body.protocol in _AI_PROVIDER_PROTOCOLS else p.protocol
+    p.base_url = (body.base_url or "").strip() or p.base_url
+    if body.api_key:
+        p.api_key_enc = _provider_cipher().encrypt(body.api_key.encode()).decode()
+    if body.models is not None:
+        p.models = [m for m in body.models if m and m.strip()]
+    p.enabled = body.enabled
+    db.commit()
+    _apply_provider_legacy_settings(db, p)
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/ai-providers/{pid}")
+def ai_provider_delete(pid: int, db: Session = Depends(get_db)):
+    p = db.get(wb.WbAiProvider, pid)
+    if not p:
+        raise HTTPException(404, "提供商不存在")
+    db.delete(p)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/ai-providers/probe-models")
+def ai_provider_probe_models(body: dict, db: Session = Depends(get_db)):
+    """按 base_url + 协议 + key 探测可用模型列表（弹窗「获取可用模型」用）。"""
+    import urllib.error
+    import urllib.request
+    base = (body.get("base_url") or "").strip().rstrip("/")
+    protocol = body.get("protocol") or "openai_chat"
+    key = (body.get("api_key") or "").strip()
+    if not base:
+        raise HTTPException(400, "请先填写 API 地址")
+    if protocol == "anthropic":
+        url = base + "/v1/models"
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    else:
+        url = base + "/models"
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise HTTPException(400, f"HTTP {e.code}: {e.read().decode()[:200]}")
+    except Exception as e:
+        raise HTTPException(400, f"获取失败: {e}")
+    items = data.get("data") if isinstance(data, dict) else data
+    ids = []
+    for it in items or []:
+        mid = it.get("id") if isinstance(it, dict) else str(it)
+        if mid:
+            ids.append(mid)
+    return {"models": ids}
+
+
+@router.post("/ai-providers/{pid}/test")
+def ai_provider_test(pid: int, db: Session = Depends(get_db)):
+    """按提供商协议做一次最小连通性测试（结果写入 AI 调用流水）。"""
+    import urllib.error
+    import urllib.request
+    p = db.get(wb.WbAiProvider, pid)
+    if not p:
+        raise HTTPException(404, "提供商不存在")
+    key = ""
+    if p.api_key_enc:
+        try:
+            key = _provider_cipher().decrypt(p.api_key_enc.encode()).decode()
+        except Exception:
+            key = ""
+    base = (p.base_url or "").strip().rstrip("/")
+    model = (p.models or ["ping"])[0] if p.models else "ping"
+    if p.protocol == "anthropic":
+        if not base:
+            raise HTTPException(400, "该提供商未配置 API 地址")
+        url, headers = base + "/v1/messages", {
+            "x-api-key": key, "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json"}
+        payload = {"model": model, "max_tokens": 16,
+                   "messages": [{"role": "user", "content": "ping"}]}
+    elif p.protocol == "openai_responses":
+        if not base:
+            raise HTTPException(400, "该提供商未配置 API 地址")
+        url, headers = base + "/responses", {
+            "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        payload = {"model": model, "input": "ping", "max_output_tokens": 16}
+    else:  # openai_chat
+        if not base:
+            raise HTTPException(400, "该提供商未配置 API 地址")
+        url, headers = base + "/chat/completions", {
+            "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        payload = {"model": model, "messages": [{"role": "user", "content": "ping"}],
+                   "max_tokens": 5}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+    start = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.loads(resp.read().decode())
+        db.add(wb.WbAiCallLog(scene="connectivity_test", model_name=model,
+                              duration_ms=int((time.time() - start) * 1000), success=1))
+        db.commit()
+        return {"ok": True, "model": model,
+                "latency_ms": int((time.time() - start) * 1000)}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()[:200]
+        db.add(wb.WbAiCallLog(scene="connectivity_test", model_name=model,
+                              success=0, error_msg=f"HTTP {e.code}: {detail}"))
+        db.commit()
+        raise HTTPException(400, f"HTTP {e.code}: {detail}")
+    except Exception as e:
+        db.add(wb.WbAiCallLog(scene="connectivity_test", model_name=model,
+                              success=0, error_msg=str(e)[:500]))
+        db.commit()
+        raise HTTPException(400, f"连通失败: {e}")
