@@ -473,6 +473,10 @@ def _row_to_payload(t, dbrow) -> dict:
 def _coerce_value(c, v):
     if v is None:
         return None
+    # JSON 列经裸 SQL（text()）绑定时无列类型信息：dict/list 必须 json 序列化，
+    # 否则 sqlite3 报 "type 'dict' is not supported"（MySQL JSON 列同样接受 JSON 字符串）
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False)
     try:
         py = c.type.python_type
     except Exception:

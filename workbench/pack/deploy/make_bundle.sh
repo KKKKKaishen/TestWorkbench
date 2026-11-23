@@ -11,11 +11,12 @@ mkdir -p $STAGE
 # 代码：顶层 py + 四个包目录（排除 __pycache__ / 测试 / 重资源）
 for f in $BASE/*.py; do
   case "$(basename $f)" in
-    server_entry.py|_mock_openai.py|_sync_e2e.py|_sync_dbg.py) continue;;
+    server_entry.py|_mock_openai.py|_sync_e2e.py|_sync_dbg.py|\
+_hotfix_cloud.py|_fix_local_triggers.py|_seed_rowver.py|_migrate_dev_to_cloud.py|_push_via_api.py) continue;;
   esac
   cp "$f" $STAGE/
 done
-for d in models services utils api; do
+for d in models services utils api schemas prompts workflows; do
   mkdir -p $STAGE/$d
   find $BASE/$d -name "*.py" -not -path "*__pycache__*" -exec cp --parents {} $STAGE/$d/ \; 2>/dev/null || \
     find $BASE/$d -name "*.py" -not -path "*__pycache__*" | while read p; do
