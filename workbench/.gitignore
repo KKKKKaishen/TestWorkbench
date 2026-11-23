@@ -1,0 +1,11 @@
+# 含服务器密码的运维脚本，禁止入库
+base/_hotfix_cloud.py
+pack/deploy/_deploy_run.py
+pack/deploy/_ssh_check.py
+pack/deploy/_ssh_mysql_check.py
+pack/deploy/_gh_release_upload.py
+pack/deploy/innosetup6.exe
+pack/deploy/staging/
+pack/deploy/dist/
+__pycache__/
+*.pyc

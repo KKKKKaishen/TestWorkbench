@@ -899,17 +899,17 @@ def _worker_loop():
     logger.info("云同步线程已启动（间隔 %ds）", _INTERVAL_S)
     fail_streak = 0
     while True:
-        # 休眠期间 _sync_now 置位可立即唤醒（手动"立即同步"）
-        fired = _sync_now.wait(
-            min(300, _INTERVAL_S * max(1, fail_streak)) if fail_streak else _INTERVAL_S)
-        _sync_now.clear()
-        if _worker_stop.is_set():
-            return
-        if not sync_enabled():
-            continue
-        if _status.get("syncing"):
-            continue
         try:
+            # 休眠期间 _sync_now 置位可立即唤醒（手动"立即同步"）
+            fired = _sync_now.wait(
+                min(300, _INTERVAL_S * max(1, fail_streak)) if fail_streak else _INTERVAL_S)
+            _sync_now.clear()
+            if _worker_stop.is_set():
+                return
+            if not sync_enabled():
+                continue
+            if _status.get("syncing"):
+                continue
             _status["syncing"] = True
             _push_once()
             _pull_once()
@@ -919,6 +919,7 @@ def _worker_loop():
             _status["last_sync_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             fail_streak = 0
         except Exception as ex:
+            # 循环体任何异常都不得杀死线程（此前 enable 重写状态表与读取竞态会导致线程静默死亡）
             _status["online"] = False
             _status["last_error"] = str(ex)[:300]
             fail_streak = min(15, fail_streak + 1)
