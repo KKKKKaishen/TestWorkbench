@@ -77,6 +77,7 @@ def build_server():
         "--paths", BASE,
         "--add-data", f"{WEB_DIST};web_dist",
         "--add-data", f"{BASE / 'static'};static",
+        "--add-data", f"{BASE / 'templates'};templates",
         "--collect-all", "playwright",
         "--collect-all", "pytest_playwright",
         *SERVER_EXCLUDES,
