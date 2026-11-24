@@ -28,8 +28,10 @@ done
 mkdir -p $STAGE/web_dist
 cp -r ../../web/dist/* $STAGE/web_dist/
 
-# 部署物料
+# 部署物料（统一转 LF，避免 Windows CRLF 在服务器 bash 上炸掉）
 mkdir -p dist
-cp requirements-lite.txt deploy_server.sh nginx-wb.conf wb-cloud.service staging/
+for f in requirements-lite.txt deploy_server.sh nginx-wb.conf wb-cloud.service; do
+  tr -d '\r' < "$f" > "staging/$f"
+done
 tar czf dist/wb-cloud-bundle.tar.gz -C staging .
 echo "打包完成: $(ls -lh dist/wb-cloud-bundle.tar.gz | awk '{print $5}')  -> pack/deploy/dist/wb-cloud-bundle.tar.gz"
