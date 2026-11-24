@@ -40,3 +40,11 @@ Thumbs.db
 !workbench/base/.env
 workbench/pack/build/
 workbench/pack/dist/
+
+# 本地测试产物
+test_kb_uploads/
+_mig_test*
+test_kb.db*
+_sync_e2e.py
+_migrate_dev_to_cloud.py
+_wait_pip_and_restart.py
