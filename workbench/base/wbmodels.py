@@ -436,6 +436,47 @@ class WbKbChunk(Base):
 # ---------------- 云同步机制表（不参与行同步） ----------------
 
 
+class WbKbSyncBase(Base):
+    """账号维度知识库元数据（云端权威副本，知识库云同步专用，不走行同步）。
+
+    id = 本地 knowledge_bases.id（UUID，各端一致）；project_id 用行同步后的
+    项目主键（行同步保持各端同主键，天然可跨设备映射）。"""
+    __tablename__ = "wb_kb_sync_bases"
+    id = Column(String(36), primary_key=True)
+    account = Column(String(100), nullable=False, index=True)
+    project_id = Column(WbPK, nullable=False, index=True)
+    name = Column(String(200), default="")
+    collection_name = Column(String(100), default="")
+    file_count = Column(Integer, default=0)
+    vector_sha = Column(String(64))               # 向量快照 sha256（无语义索引为 NULL）
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class WbKbSyncFile(Base):
+    """账号维度知识文档记录（云端权威副本）。id = knowledge_files.id。"""
+    __tablename__ = "wb_kb_sync_files"
+    id = Column(String(64), primary_key=True)
+    base_id = Column(String(36), nullable=False, index=True)
+    filename = Column(String(255), default="")
+    file_path = Column(String(255), default="")   # uuid.ext（原始文件 blob 名）
+    file_size = Column(BigInteger, default=0)
+    file_type = Column(String(20), default="")
+    content_hash = Column(String(64), index=True)
+    status = Column(String(20), default="completed")
+    chunk_count = Column(Integer, default=0)
+    skipped_chunks = Column(Integer, default=0)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class WbKbSyncChunk(Base):
+    """账号维度知识文档分块（关键词检索数据源的云端副本，不走行同步）。"""
+    __tablename__ = "wb_kb_sync_chunks"
+    id = Column(WbPK, primary_key=True, autoincrement=True)
+    file_id = Column(String(64), nullable=False, index=True)
+    chunk_no = Column(Integer, nullable=False, default=0)
+    content = Column(LongText, nullable=False)
+
+
 class WbSyncRowver(Base):
     """行版本表：每行业务数据的同步元数据。
 

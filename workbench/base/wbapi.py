@@ -3421,7 +3421,7 @@ def test_model(provider: str = "deepseek", db: Session = Depends(get_db)):
 
 
 _KB_ALLOWED_EXT = {".pdf", ".docx", ".xlsx", ".pptx", ".md", ".txt"}
-_KB_MARKER_PREFIX = "workshop_project:"
+_KB_MARKER_PREFIX = "workshop_project:"  # 与 wbsync.KB_MARKER_PREFIX 保持一致（wbsync 本模块内懒加载，此处不能引用）
 
 
 def _decrypt_wb_secret(db: Session, setting_key: str) -> str | None:
@@ -4322,6 +4322,179 @@ def sync_files_download(path: str, _t: None = _Depends(_check_sync_token)):
     if not target.is_file():
         raise HTTPException(404, "文件不存在")
     return _Response(content=target.read_bytes(), media_type="application/octet-stream")
+
+
+@router.post("/sync/files/delete")
+def sync_files_delete(path: str, _t: None = _Depends(_check_sync_token)):
+    """删除云端 blob（对账发现两端都确认删除后调用；同步行不通时文件无害残留）。"""
+    rel = _safe_rel_path(path)
+    target = Path(get_upload_dir()).resolve() / rel
+    from models.database import create_session
+    with create_session() as db:
+        db.execute(_text("DELETE FROM wb_sync_files WHERE rel_path = :r"), {"r": rel})
+        db.commit()
+    try:
+        if target.is_file():
+            target.unlink()
+    except OSError:
+        pass
+    return {"ok": True}
+
+
+# ================= 知识库云同步（账号维度专属通道，不走行同步） =================
+# 云端权威副本：元数据/文档记录/分块存 wb_kb_sync_* 表；原始文件与向量快照存
+# uploads/kb_sync/<account>/ 下（经 /sync/files/upload|download 通道搬运）。
+
+
+def _kb_sync_blob_rel(account: str, name: str) -> str:
+    """blob 相对路径：kb_sync/<account>/<name>（name 已在客户端限定安全字符）。"""
+    acc = (account or "").strip()
+    if not acc or "/" in acc or "\\" in acc or ".." in acc:
+        raise HTTPException(400, "非法账号标识")
+    name = (name or "").strip()
+    if "/" in name or "\\" in name or ".." in name or name.startswith("."):
+        raise HTTPException(400, "非法 blob 名称")
+    return f"kb_sync/{acc}/{name}"
+
+
+@router.get("/kbsync/manifest")
+def kbsync_manifest(account: str, _t: None = _Depends(_check_sync_token)):
+    """云端账号知识库清单（元数据 + 文档记录），客户端据此做双向对账。"""
+    from models.database import create_session
+
+    account = (account or "").strip()[:100]
+    with create_session() as db:
+        bases = db.query(wb.WbKbSyncBase).filter(wb.WbKbSyncBase.account == account).all()
+        files = (db.query(wb.WbKbSyncFile)
+                 .join(wb.WbKbSyncBase, wb.WbKbSyncFile.base_id == wb.WbKbSyncBase.id)
+                 .filter(wb.WbKbSyncBase.account == account).all())
+        return {
+            "bases": [{"id": b.id, "project_id": b.project_id, "name": b.name or "",
+                       "collection_name": b.collection_name or "",
+                       "file_count": b.file_count or 0, "vector_sha": b.vector_sha}
+                      for b in bases],
+            "files": [{"id": f.id, "base_id": f.base_id, "filename": f.filename or "",
+                       "file_path": f.file_path or "", "file_size": f.file_size or 0,
+                       "file_type": f.file_type or "", "content_hash": f.content_hash,
+                       "chunk_count": f.chunk_count or 0,
+                       "skipped_chunks": f.skipped_chunks or 0} for f in files],
+        }
+
+
+@router.post("/kbsync/upsert_base")
+def kbsync_upsert_base(body: dict, _t: None = _Depends(_check_sync_token)):
+    from models.database import create_session
+
+    bid = str(body.get("id") or "").strip()
+    account = str(body.get("account") or "").strip()[:100]
+    if not bid or not account:
+        raise HTTPException(400, "参数不完整")
+    with create_session() as db:
+        row = db.get(wb.WbKbSyncBase, bid)
+        if row is None:
+            row = wb.WbKbSyncBase(id=bid, account=account)
+            db.add(row)
+        row.account = account
+        row.project_id = int(body.get("project_id") or 0)
+        row.name = str(body.get("name") or "")[:200]
+        row.collection_name = str(body.get("collection_name") or "")[:100]
+        row.file_count = int(body.get("file_count") or 0)
+        if body.get("vector_sha") is not None:
+            row.vector_sha = str(body.get("vector_sha"))[:64] or None
+        db.commit()
+    return {"ok": True}
+
+
+@router.post("/kbsync/upsert_file")
+def kbsync_upsert_file(body: dict, _t: None = _Depends(_check_sync_token)):
+    from models.database import create_session
+
+    fid = str(body.get("id") or "").strip()
+    bid = str(body.get("base_id") or "").strip()
+    if not fid or not bid:
+        raise HTTPException(400, "参数不完整")
+    with create_session() as db:
+        if not db.get(wb.WbKbSyncBase, bid):
+            raise HTTPException(404, "知识库不存在（先 upsert_base）")
+        row = db.get(wb.WbKbSyncFile, fid)
+        if row is None:
+            row = wb.WbKbSyncFile(id=fid, base_id=bid)
+            db.add(row)
+        row.base_id = bid
+        row.filename = str(body.get("filename") or "")[:255]
+        row.file_path = str(body.get("file_path") or "")[:255]
+        row.file_size = int(body.get("file_size") or 0)
+        row.file_type = str(body.get("file_type") or "")[:20]
+        row.content_hash = str(body.get("content_hash") or "")[:64] or None
+        row.status = str(body.get("status") or "completed")[:20]
+        row.chunk_count = int(body.get("chunk_count") or 0)
+        row.skipped_chunks = int(body.get("skipped_chunks") or 0)
+        db.commit()
+    return {"ok": True}
+
+
+@router.post("/kbsync/delete_files")
+def kbsync_delete_files(body: dict, _t: None = _Depends(_check_sync_token)):
+    """删除云端文档记录 + 分块 + blob（账号内；base 无文件时顺带清理）。"""
+    from models.database import create_session
+
+    ids = [str(i) for i in (body.get("ids") or []) if str(i).strip()]
+    if not ids:
+        return {"ok": True, "deleted": []}
+    upload_root = Path(get_upload_dir()).resolve()
+    deleted = []
+    with create_session() as db:
+        for fid in ids:
+            row = db.get(wb.WbKbSyncFile, fid)
+            if row is None:
+                continue
+            base = db.get(wb.WbKbSyncBase, row.base_id)
+            acc = base.account if base else ""
+            if acc:
+                for name in (row.file_path or "", f"{fid}.vectors.json"):
+                    if name:
+                        blob = upload_root / _kb_sync_blob_rel(acc, name)
+                        try:
+                            if blob.is_file():
+                                blob.unlink()
+                        except OSError:
+                            pass
+            db.query(wb.WbKbSyncChunk).filter(wb.WbKbSyncChunk.file_id == fid).delete()
+            db.delete(row)
+            deleted.append(fid)
+        db.commit()
+    return {"ok": True, "deleted": deleted}
+
+
+@router.get("/kbsync/chunks")
+def kbsync_get_chunks(file_id: str, _t: None = _Depends(_check_sync_token)):
+    from models.database import create_session
+
+    with create_session() as db:
+        rows = (db.query(wb.WbKbSyncChunk)
+                .filter(wb.WbKbSyncChunk.file_id == file_id)
+                .order_by(wb.WbKbSyncChunk.chunk_no).all())
+        return {"chunks": [{"no": r.chunk_no, "content": r.content} for r in rows]}
+
+
+@router.post("/kbsync/chunks")
+def kbsync_set_chunks(body: dict, _t: None = _Depends(_check_sync_token)):
+    """整文件替换云端分块（幂等：先删后插）。"""
+    from models.database import create_session
+
+    fid = str(body.get("file_id") or "").strip()
+    chunks = body.get("chunks") or []
+    if not fid:
+        raise HTTPException(400, "参数不完整")
+    with create_session() as db:
+        db.query(wb.WbKbSyncChunk).filter(wb.WbKbSyncChunk.file_id == fid).delete()
+        for i, c in enumerate(chunks):
+            content = str(c.get("content") or "")
+            if content.strip():
+                db.add(wb.WbKbSyncChunk(file_id=fid, chunk_no=int(c.get("no", i)),
+                                        content=content))
+        db.commit()
+    return {"ok": True, "count": len(chunks)}
 
 # ================= AI 模型提供商（新增模型提供商弹窗） ========================
 

@@ -48,3 +48,9 @@ test_kb.db*
 _sync_e2e.py
 _migrate_dev_to_cloud.py
 _wait_pip_and_restart.py
+_kb_sync_e2e.py
+_kb_e2e_out.txt
+_kb_e2e.docx
+_kb_sync_e2e.py
+_kb_e2e_out.txt
+_kb_e2e.docx

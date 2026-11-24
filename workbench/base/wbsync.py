@@ -51,6 +51,8 @@ IS_CLOUD = (os.getenv("WB_SYNC_ROLE") or "").strip().lower() == "cloud"
 _EXCLUDED = {
     "wb_sync_rowver", "wb_sync_state", "wb_sync_files", "wb_sync_apply_flag",
     "wb_ai_call_logs", "wb_kb_chunks", "wb_user",
+    # 知识库云同步专用表（账号维度，走 _kb_sync_once 专属通道，不进行同步）
+    "wb_kb_sync_bases", "wb_kb_sync_files", "wb_kb_sync_chunks",
 }
 ID_STRIDE = 1_000_000_000  # 每客户端 ID 区间宽度
 PUSH_BATCH = 200
@@ -1037,6 +1039,8 @@ def _sync_files_once() -> tuple[int, int]:
                    raw_body=body, timeout=300)
         up += 1
     for rel, meta in remote.items():
+        if rel.startswith("kb_sync/"):
+            continue  # 知识库专属 blob：由 _kb_sync_once 定向搬运，不进通用对账
         hit = local.get(rel)
         if hit and hit["sha256"] == meta["sha256"]:
             continue
@@ -1053,6 +1057,316 @@ def _sync_files_once() -> tuple[int, int]:
         _hash_cache.pop(str(target), None)
         down += 1
     return up, down
+
+
+# 知识库云同步（账号维度专属通道） ---------------------------------------------
+# 元数据/文档记录/分块 → 云端 wb_kb_sync_* 表；原始文件与向量快照 → 云端
+# uploads/kb_sync/<account>/ blob。删除经影子对账（kb_push_shadow/kb_pull_shadow）传播。
+
+KB_MARKER_PREFIX = "workshop_project:"  # 项目知识库标记（与 wbapi._KB_MARKER_PREFIX 同源）
+
+
+def _kb_blob_rel(account: str, name: str) -> str:
+    return f"kb_sync/{account}/{name}"
+
+
+def _kb_local_inventory() -> list[dict]:
+    """本机全部知识库（含 completed 文件清单），推送/拉取共用。"""
+    from models.database import create_session
+    from models.knowledge_models import KnowledgeBase, KnowledgeFile
+
+    with create_session() as db:
+        kbs = db.query(KnowledgeBase).all()
+        files = db.query(KnowledgeFile).filter(KnowledgeFile.status == "completed").all()
+        out = []
+        for kb in kbs:
+            pid = None
+            desc = kb.description or ""
+            if desc.startswith(KB_MARKER_PREFIX):
+                try:
+                    pid = int(desc[len(KB_MARKER_PREFIX):])
+                except ValueError:
+                    pid = None
+            out.append({
+                "id": kb.id, "project_id": pid, "name": kb.name or "",
+                "collection_name": kb.collection_name or "",
+                "files": [{
+                    "id": f.id, "base_id": kb.id, "filename": f.filename or "",
+                    "file_path": f.file_path or "", "file_size": f.file_size or 0,
+                    "file_type": f.file_type or "", "content_hash": f.content_hash,
+                    "chunk_count": f.chunk_count or 0,
+                    "skipped_chunks": f.skipped_chunks or 0,
+                } for f in files if f.knowledge_base_id == kb.id],
+            })
+        return out
+
+
+def _kb_vector_snapshot(collection_name: str) -> dict | None:
+    """导出 Chroma 集合快照（向量随同步搬运，换设备免重算 embedding）。"""
+    try:
+        from utils.file_handle import get_chromadb_client
+
+        col = get_chromadb_client().get_collection(name=collection_name)
+        if not col.count():
+            return None
+        got = col.get(include=["documents", "embeddings", "metadatas"])
+        embs = got.get("embeddings")
+        if embs is None:
+            embs = []
+        metas = [{k: v for k, v in (m or {}).items() if v is not None}
+                 for m in (got.get("metadatas") or [])]
+        return {
+            "collection": collection_name,
+            "metadata": col.metadata or {},
+            "ids": list(got.get("ids") or []),
+            "documents": list(got.get("documents") or []),
+            "metadatas": metas,
+            "embeddings": [[float(x) for x in e] for e in embs],
+        }
+    except Exception:
+        logger.exception("导出向量快照失败: %s", collection_name)
+        return None
+
+
+def _kb_rebuild_collection(snapshot: dict) -> None:
+    """用快照重建本地 Chroma 集合（向量直灌，不调用 embedding API）。"""
+    from utils.file_handle import get_chromadb_client
+
+    client = get_chromadb_client()
+    name = snapshot["collection"]
+    try:
+        client.delete_collection(name)
+    except Exception:
+        pass
+    meta = {k: v for k, v in (snapshot.get("metadata") or {}).items() if v is not None}
+    col = client.create_collection(name=name, metadata=meta or None)
+    ids = snapshot["ids"]
+    step = 500
+    for i in range(0, len(ids), step):
+        col.add(ids=ids[i:i + step],
+                documents=snapshot["documents"][i:i + step],
+                metadatas=snapshot["metadatas"][i:i + step],
+                embeddings=snapshot["embeddings"][i:i + step])
+
+
+def _kb_delete_local_file(db, fr) -> None:
+    """删除本地知识文档：分块 + 向量条目 + 原始文件 + 记录行。"""
+    import wbmodels as _wb
+
+    db.query(_wb.WbKbChunk).filter(_wb.WbKbChunk.file_id == fr.id).delete()
+    # 向量条目按元数据删除（集合可能不存在：无语义索引时静默跳过）
+    try:
+        from models.knowledge_models import KnowledgeBase
+        from utils.file_handle import get_chromadb_client
+
+        kb = db.get(KnowledgeBase, fr.knowledge_base_id)
+        if kb and kb.collection_name:
+            get_chromadb_client().get_collection(name=kb.collection_name).delete(
+                where={"file_id": fr.id})
+    except Exception:
+        pass
+    try:
+        loc = _resolve_upload_file(fr.file_path) if fr.file_path else None
+        if loc and loc.is_file():
+            loc.unlink()
+    except OSError:
+        pass
+    db.delete(fr)
+
+
+def _kb_sync_once() -> None:
+    """知识库账号维度双向同步（同步线程每轮调用；任何失败不影响行同步）。"""
+    import urllib.parse
+    import urllib.request
+
+    from models.database import create_session
+    from models.knowledge_models import KnowledgeBase, KnowledgeFile
+
+    account = (get_state("account", "") or "").strip()
+    if not account:
+        return
+
+    push_shadow = json.loads(get_state("kb_push_shadow", "") or "{}")
+    pull_shadow = json.loads(get_state("kb_pull_shadow", "") or "{}")
+    vec_state = json.loads(get_state("kb_vec_state", "") or "{}")
+
+    manifest = _http_json("GET", _cloud_url(
+        "/wb/kbsync/manifest?account=" + urllib.parse.quote(account)))
+    cloud_files = {f["id"]: f for f in manifest.get("files", [])}
+    cloud_by_base: dict[str, list[dict]] = {}
+    for f in cloud_files.values():
+        cloud_by_base.setdefault(f["base_id"], []).append(f)
+    cloud_bases = {b["id"]: b for b in manifest.get("bases", [])}
+
+    # ---------- 推送：本机知识库 → 云端 ----------
+    locals_ = _kb_local_inventory()
+    new_push_shadow: dict[str, dict] = {}
+    for kb in locals_:
+        present = {f["id"] for f in kb["files"]}
+        deleted_ids = [fid for fid in push_shadow if fid not in present]
+        if deleted_ids:  # 本机已删 → 云端删（含 blob）
+            _http_json("POST", _cloud_url("/wb/kbsync/delete_files"), {"ids": deleted_ids})
+            for fid in deleted_ids:
+                push_shadow.pop(fid, None)
+        changed = [f for f in kb["files"]
+                   if push_shadow.get(f["id"], {}).get("h") != (f["content_hash"] or f["id"])]
+        # 向量快照：有文件变化或从未上传过时导出；无变化沿用上次 sha。
+        # 本机无向量时保持云端现状（不能把其他设备上传的 vector_sha 清掉）
+        snap_body = None
+        vec_sha = vec_state.get(kb["collection_name"])
+        if kb["collection_name"] and (changed or vec_sha is None):
+            snap = _kb_vector_snapshot(kb["collection_name"])
+            if snap:
+                snap_body = json.dumps(snap, ensure_ascii=False).encode("utf-8")
+                vec_sha = hashlib.sha256(snap_body).hexdigest()
+            else:
+                vec_sha = cloud_bases.get(kb["id"], {}).get("vector_sha")
+        _http_json("POST", _cloud_url("/wb/kbsync/upsert_base"), {
+            "id": kb["id"], "account": account,
+            "project_id": kb["project_id"] or 0, "name": kb["name"],
+            "collection_name": kb["collection_name"],
+            "file_count": len(kb["files"]), "vector_sha": vec_sha,
+        })
+        if snap_body and vec_sha:
+            _http_json("POST", _cloud_url("/wb/sync/files/upload?path=" + urllib.parse.quote(
+                           _kb_blob_rel(account, f"{kb['id']}.vectors.json"))),
+                       raw_body=snap_body, timeout=300)
+            vec_state[kb["collection_name"]] = vec_sha
+        for f in changed:
+            _http_json("POST", _cloud_url("/wb/kbsync/upsert_file"), dict(f))
+            with create_session() as db:
+                rows = db.execute(text(
+                    "SELECT chunk_no, content FROM wb_kb_chunks WHERE file_id = :f "
+                    "ORDER BY chunk_no"), {"f": f["id"]}).fetchall()
+            _http_json("POST", _cloud_url("/wb/kbsync/chunks"), {
+                "file_id": f["id"],
+                "chunks": [{"no": n, "content": c} for n, c in rows]})
+            src = _resolve_upload_file(f["file_path"]) if f["file_path"] else None
+            if src and src.is_file():
+                _http_json("POST", _cloud_url("/wb/sync/files/upload?path=" + urllib.parse.quote(
+                               _kb_blob_rel(account, f["file_path"]))),
+                           raw_body=src.read_bytes(), timeout=300)
+        new_push_shadow.update({f["id"]: {"h": f["content_hash"] or f["id"]}
+                                for f in kb["files"]})
+    set_state("kb_push_shadow", json.dumps(new_push_shadow))
+    set_state("kb_vec_state", json.dumps(vec_state))
+
+    # ---------- 拉取：云端 → 本机（换设备恢复 / 他端变更套用） ----------
+    gone = [fid for fid in pull_shadow if fid not in cloud_files]
+    if gone:  # 云端已删除（他端删的）→ 本地跟随删除
+        with create_session() as db:
+            for fid in gone:
+                fr = db.get(KnowledgeFile, fid)
+                if fr is not None:
+                    _kb_delete_local_file(db, fr)
+            db.commit()
+    upload_root = Path(get_upload_dir()).resolve()
+    with create_session() as db:
+        local_files = {f.id: (f.content_hash or f.id) for f in db.query(KnowledgeFile).all()}
+    restored = 0
+    for b in manifest.get("bases", []):
+        pid = b.get("project_id")
+        # 解析本地 KB：优先同 id（换设备恢复），其次项目标记（双端各自建过库）
+        kb = None
+        with create_session() as db:
+            kb = db.get(KnowledgeBase, b["id"])
+            if kb is None and pid:
+                kb = db.query(KnowledgeBase).filter(
+                    KnowledgeBase.description == f"{KB_MARKER_PREFIX}{pid}").first()
+            if kb is None:
+                if not pid:
+                    continue
+                # 项目必须已随行同步到位（否则下轮重试），KB 用云端身份重建
+                import wbmodels as _wb
+                if db.get(_wb.WbProject, pid) is None:
+                    continue
+                kb = KnowledgeBase(
+                    id=b["id"], name=b.get("name") or "知识库",
+                    description=f"{KB_MARKER_PREFIX}{pid}",
+                    collection_name=b.get("collection_name") or f"wbkb_{b['id'][:16]}",
+                    owner_user_id=None, visibility="private")
+                db.add(kb)
+                db.commit()
+        kb_id, collection = kb.id, kb.collection_name or ""
+        for cf in cloud_by_base.get(b["id"], []):
+            fh = cf.get("content_hash") or cf["id"]
+            if local_files.get(cf["id"]) == fh:
+                continue  # 本地已是同内容
+            # 原始文件 blob
+            raw = None
+            if cf.get("file_path"):
+                req = urllib.request.Request(_cloud_url(
+                    "/wb/sync/files/download?path=" + urllib.parse.quote(
+                        _kb_blob_rel(account, cf["file_path"]))),
+                    headers={"X-Sync-Token": get_state("token", "") or ""})
+                try:
+                    with urllib.request.urlopen(req, timeout=300) as resp:
+                        raw = resp.read()
+                except Exception:
+                    logger.exception("知识文档 blob 下载失败: %s", cf["id"])
+                    continue
+            # 分块拉取必须在本地写事务之外（嵌套连接会撞 BEGIN IMMEDIATE 写锁等 30s）
+            remote_chunks = {"chunks": []}
+            try:
+                remote_chunks = _http_json("GET", _cloud_url(
+                    "/wb/kbsync/chunks?file_id=" + urllib.parse.quote(cf["id"])))
+            except Exception:
+                logger.exception("知识分块拉取失败: %s", cf["id"])
+            with create_session() as db:
+                fr = db.get(KnowledgeFile, cf["id"])
+                if fr is None:
+                    fr = KnowledgeFile(id=cf["id"], knowledge_base_id=kb_id)
+                    db.add(fr)
+                fr.filename = cf.get("filename") or fr.filename
+                fr.file_path = cf.get("file_path") or fr.file_path
+                fr.file_size = cf.get("file_size") or 0
+                fr.file_type = cf.get("file_type") or ""
+                fr.content_hash = cf.get("content_hash")
+                fr.status = "completed"
+                fr.chunk_count = cf.get("chunk_count") or 0
+                fr.skipped_chunks = cf.get("skipped_chunks") or 0
+                fr.error = None
+                if raw is not None and cf.get("file_path"):
+                    target = upload_root / cf["file_path"]
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(raw)
+                # 分块整文件替换
+                import wbmodels as _wb
+                db.query(_wb.WbKbChunk).filter(_wb.WbKbChunk.file_id == cf["id"]).delete()
+                for c in remote_chunks.get("chunks", []):
+                    content = str(c.get("content") or "")
+                    if content.strip():
+                        db.add(_wb.WbKbChunk(kb_id=kb_id, file_id=cf["id"],
+                                             chunk_no=int(c.get("no") or 0),
+                                             content=content))
+                db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).update({
+                    "file_count": (db.query(KnowledgeFile)
+                                   .filter(KnowledgeFile.knowledge_base_id == kb_id).count())})
+                db.commit()
+            local_files[cf["id"]] = fh
+            restored += 1
+        # 向量快照：云端版本与本地记录不同 → 拉回重建（换设备/他端重建索引）
+        cvec = b.get("vector_sha")
+        if collection and cvec and vec_state.get(collection) != cvec:
+            req = urllib.request.Request(_cloud_url(
+                "/wb/sync/files/download?path=" + urllib.parse.quote(
+                    _kb_blob_rel(account, f"{b['id']}.vectors.json"))),
+                headers={"X-Sync-Token": get_state("token", "") or ""})
+            try:
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    snap = json.loads(resp.read().decode("utf-8"))
+                _kb_rebuild_collection(snap)
+                vec_state[collection] = cvec
+                set_state("kb_vec_state", json.dumps(vec_state))
+                logger.info("知识库向量已从云端恢复: %s（%d 条）",
+                            collection, len(snap.get("ids") or []))
+            except Exception:
+                logger.exception("向量快照拉取失败: %s", collection)
+    new_pull_shadow = {fid: (f.get("content_hash") or fid)
+                       for fid, f in cloud_files.items()}
+    set_state("kb_pull_shadow", json.dumps(new_pull_shadow))
+    if restored or gone:
+        logger.info("知识库同步：恢复/更新 %d 个文档，跟随删除 %d 个", restored, len(gone))
 
 
 # 同步线程 ---------------------------------------------------------------------
@@ -1081,6 +1395,10 @@ def _worker_loop():
             _push_once()
             _pull_once()
             down = _sync_files_once()[1]
+            try:
+                _kb_sync_once()  # 知识库账号维度同步（失败不影响行同步）
+            except Exception:
+                logger.exception("知识库云同步失败（不影响行同步）")
             _status["online"] = True
             _status["last_error"] = None
             _status["last_sync_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
