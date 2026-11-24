@@ -10,7 +10,16 @@
       </div>
       <div v-if="inShell" class="wb-titlebar-btns">
         <button class="tb-btn" title="最小化" @click="winMin"><el-icon><Minus /></el-icon></button>
-        <button class="tb-btn" title="最大化/还原" @click="winMax"><el-icon><FullScreen /></el-icon></button>
+        <button class="tb-btn" :title="isMax ? '还原' : '最大化'" @click="winMax">
+          <!-- 与 Windows 标准字形一致：最大化 = 单方框，还原 = 双层叠框 -->
+          <svg v-if="!isMax" width="10" height="10" viewBox="0 0 10 10">
+            <rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" />
+          </svg>
+          <svg v-else width="10" height="10" viewBox="0 0 10 10">
+            <rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" />
+            <path d="M2.5 2.5 V0.5 H9.5 V7.5 H7.5" fill="none" stroke="currentColor" />
+          </svg>
+        </button>
         <button class="tb-btn tb-close" title="关闭" @click="winClose"><el-icon><Close /></el-icon></button>
       </div>
     </header>
@@ -67,6 +76,7 @@ const route = useRoute()
 
 // 客户端模式检测：pywebview 注入的 JS 桥可用时才显示窗口控制按钮
 const inShell = ref(false)
+const isMax = ref(false)   // 由壳进程 toggle_max 返回值驱动图标切换
 function _markShell() { inShell.value = !!(window.pywebview && window.pywebview.api) }
 onMounted(() => {
   _markShell()
@@ -75,7 +85,12 @@ onMounted(() => {
 onUnmounted(() => window.removeEventListener('pywebviewready', _markShell))
 
 function winMin() { window.pywebview?.api?.minimize() }
-function winMax() { window.pywebview?.api?.toggle_max() }
+async function winMax() {
+  try {
+    const st = await window.pywebview?.api?.toggle_max()
+    isMax.value = !!st
+  } catch { /* 旧版壳无返回值 */ }
+}
 function winClose() { window.pywebview?.api?.close() }
 
 const menus = [
@@ -122,6 +137,7 @@ const execMenus = [
   color: #6b7280; cursor: pointer; font-size: 14px; outline: none;
 }
 .tb-btn:hover { background: #eef1f6; color: #111827; }
+.tb-btn svg { display: block; }
 .tb-btn.tb-close:hover { background: #e81123; color: #fff; }
 
 .wb-shell { display: flex; flex: 1; min-height: 0; overflow: hidden; }

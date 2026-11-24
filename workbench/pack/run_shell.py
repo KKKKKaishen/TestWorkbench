@@ -60,6 +60,7 @@ class WindowApi:
         else:
             window.maximize()
             _maxed = True
+        return _maxed  # 返回新状态供前端切换最大化/还原图标
 
     def close(self):
         window.destroy()
@@ -68,7 +69,11 @@ class WindowApi:
         """从本地服务下载文件到系统默认下载目录（无弹窗，重名自动加序号）。
         返回保存路径；失败抛异常（pywebview 会转成前端 Promise 拒绝）。"""
         import urllib.error
+        import urllib.parse
 
+        # 前端可能传相对路径（同源部署），补全为指向本地服务的绝对地址
+        if url.startswith("/"):
+            url = f"http://127.0.0.1:{PORT}{urllib.parse.quote(url)}"
         dest_dir = Path.home() / "Downloads"
         dest_dir.mkdir(parents=True, exist_ok=True)
         safe_name = Path(filename).name or "download"
@@ -206,6 +211,7 @@ def main():
             width=1440,
             height=900,
             frameless=True,        # 去掉系统标题栏，客户端化外观
+            easy_drag=False,       # 关闭全窗口拖拽：仅标题栏 pywebview-drag-region 可移动窗口
             js_api=WindowApi(),    # 前端自绘标题栏的最小化/最大化/关闭
         )
         _log("窗口已创建，进入事件循环")

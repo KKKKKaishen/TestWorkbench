@@ -305,7 +305,8 @@ function previewKindOf(name) {
 }
 
 function fileUrl(row) {
-  return `/wb/knowledge/files/${row.id}/download?project_id=${projectId.value}`
+  // 客户端壳进程直接下载时必须是绝对地址（相对路径 urllib 无法打开）
+  return `${window.location.origin}/wb/knowledge/files/${row.id}/download?project_id=${projectId.value}`
 }
 
 async function fetchFileBuffer(row) {

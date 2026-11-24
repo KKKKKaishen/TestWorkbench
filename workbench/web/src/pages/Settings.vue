@@ -81,7 +81,7 @@
       </div>
 
       <!-- 模型提供商（统一配置入口） -->
-      <div class="provider-sub-title">模型提供商（{{ providers.length }}）</div>
+      <div class="provider-sub-title">模型提供商</div>
       <el-table v-if="providers.length" :data="providers" size="small">
         <el-table-column label="提供商" min-width="180">
           <template #default="{ row }">

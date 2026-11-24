@@ -446,10 +446,18 @@ def _after_flush_tombstone(session, flush_context):
     pending = _pending_cascades.pop(id(session), None)
     if not pending or not _ACTIVE:
         return
+    if not pending[0] and not pending[1]:
+        return  # 无级联受害行：直接跳过（避免无谓的状态读取）
     try:
         conn = session.connection()
         stamp = _stamp_now()
-        client_id = "server" if IS_CLOUD else (get_state("client_id", "") or "local")
+        # 必须复用当前 session 读状态：另开新会话会在 BEGIN IMMEDIATE 模式下
+        # 撞上本事务持有的写锁，busy_timeout 等满 30s（曾致所有删除操作耗时 32 秒）
+        try:
+            client_id = ("server" if IS_CLOUD
+                         else (_state_get(session, "client_id") or "local"))
+        except Exception:
+            client_id = "local"  # wb_sync_state 尚未创建（同步从未启用）
         _apply_cascade_aftermath(conn, pending[0], pending[1], stamp, client_id,
                                  dirty=not IS_CLOUD)
     except Exception:
@@ -565,10 +573,45 @@ def _cloud_url(path: str) -> str:
 # 启用同步：注册 + 存量迁移 -----------------------------------------------------
 
 
+class _RawAutocommit:
+    """底层 DBAPI 原生连接（AUTOCOMMIT），绕开 SQLAlchemy 事务管理。
+
+    SQLite 引擎装了 begin 事件（BEGIN IMMEDIATE）：经 SQLAlchemy 执行的语句都
+    会被包进写事务，而 SQLite 规定 PRAGMA foreign_keys 不能在事务内修改
+    （静默 no-op），导致迁移/清库时外键关不掉直接 IntegrityError。
+    批量迁移、清库必须走原生连接逐语句自动提交。"""
+
+    def __init__(self, eng):
+        proxy = eng.raw_connection()
+        self._proxy = proxy
+        self.raw = getattr(proxy, "driver_connection", proxy)
+        self.is_mysql = eng.dialect.name == "mysql"
+        if self.is_mysql:
+            self.raw.autocommit(True)
+
+    def execute(self, sql: str, args: dict | None = None):
+        return self.raw.execute(sql, args or ())
+
+    def close(self):
+        try:
+            if self.is_mysql:
+                self.raw.autocommit(False)
+        except Exception:
+            pass
+        self._proxy.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
 def _remap_existing_data(offset: int) -> None:
     """存量库一次性平移到本客户端 ID 区间（幂等：只动 < offset 的 ID）。
 
-    用 AUTOCOMMIT 连接执行（SQLite 关外键用 PRAGMA；MySQL 用 FOREIGN_KEY_CHECKS）；
+    用原生 AUTOCOMMIT 连接执行（SQLite 关外键用 PRAGMA；MySQL 用 FOREIGN_KEY_CHECKS）；
     中途中断可重跑续迁（已平移的行 ID >= offset 会被跳过）。
     迁移同时把存量行播种进 wb_sync_rowver（dirty=1），否则推送永远看不到存量数据。"""
     eng = get_engine()
@@ -579,30 +622,29 @@ def _remap_existing_data(offset: int) -> None:
     client_id = get_state("client_id", "") or "local"
     seed = ("INSERT IGNORE INTO" if eng.dialect.name == "mysql"
             else "INSERT OR IGNORE INTO")
-    with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        is_mysql = eng.dialect.name == "mysql"
-        if is_mysql:
-            conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+    with _RawAutocommit(eng) as rc:
+        if rc.is_mysql:
+            rc.execute("SET FOREIGN_KEY_CHECKS=0")
         else:
-            conn.execute(text("PRAGMA foreign_keys=OFF"))
+            rc.execute("PRAGMA foreign_keys=OFF")
         for t in tables:
-            conn.execute(text(f"UPDATE `{t.name}` SET id = id + :o WHERE id < :o"), {"o": offset})
+            rc.execute(f"UPDATE `{t.name}` SET id = id + :o WHERE id < :o", {"o": offset})
             for fk in t.foreign_keys:
                 col = fk.parent.name
-                conn.execute(text(f"UPDATE `{t.name}` SET `{col}` = `{col}` + :o "
-                                  f"WHERE `{col}` IS NOT NULL AND `{col}` < :o"), {"o": offset})
+                rc.execute(f"UPDATE `{t.name}` SET `{col}` = `{col}` + :o "
+                           f"WHERE `{col}` IS NOT NULL AND `{col}` < :o", {"o": offset})
             for col in PLAIN_REFS.get(t.name, ()):  # 无约束的语义引用列同幅平移
-                conn.execute(text(f"UPDATE `{t.name}` SET `{col}` = `{col}` + :o "
-                                  f"WHERE `{col}` IS NOT NULL AND `{col}` < :o"), {"o": offset})
+                rc.execute(f"UPDATE `{t.name}` SET `{col}` = `{col}` + :o "
+                           f"WHERE `{col}` IS NOT NULL AND `{col}` < :o", {"o": offset})
             # 播种存量行为待推送
-            conn.execute(text(
+            rc.execute(
                 f"{seed} wb_sync_rowver(table_name, row_pk, stamp, client_id, deleted, dirty) "
-                f"SELECT '{t.name}', id, :st, :cid, 0, 1 FROM `{t.name}`"),
+                f"SELECT '{t.name}', id, :st, :cid, 0, 1 FROM `{t.name}`",
                 {"st": stamp, "cid": client_id})
-        if is_mysql:
-            conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+        if rc.is_mysql:
+            rc.execute("SET FOREIGN_KEY_CHECKS=1")
         else:
-            conn.execute(text("PRAGMA foreign_keys=ON"))
+            rc.execute("PRAGMA foreign_keys=ON")
     # auto_runs 目录随运行 ID 平移重命名，附件绝对路径同步改写
     runs_dir = upload / "auto_runs"
     if runs_dir.exists():
@@ -756,12 +798,13 @@ def _restore_temp_data() -> bool:
     beng = _ce(f"sqlite:///{backup}")
     eng = get_engine()
     try:
-        with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as dst, \
-                beng.connect() as src:
-            if dst.dialect.name == "sqlite":
-                dst.execute(text("PRAGMA foreign_keys=OFF"))
+        with beng.connect() as src, _RawAutocommit(eng) as dst:
+            if dst.is_mysql:
+                dst.execute("SET FOREIGN_KEY_CHECKS=0")
+            else:
+                dst.execute("PRAGMA foreign_keys=OFF")
             for t in reversed(tables):
-                dst.execute(text(f"DELETE FROM `{t.name}`"))
+                dst.execute(f"DELETE FROM `{t.name}`")
             for t in tables:
                 rows = src.execute(t.select()).fetchall()
                 if rows:
@@ -784,15 +827,15 @@ def logout_and_clear() -> dict:
     _ACTIVE = False
     _uninstall_triggers()
     eng = get_engine()
-    with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        if eng.dialect.name == "sqlite":
-            conn.execute(text("PRAGMA foreign_keys=OFF"))
+    with _RawAutocommit(eng) as rc:
+        if rc.is_mysql:
+            rc.execute("SET FOREIGN_KEY_CHECKS=0")
         else:
-            conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+            rc.execute("PRAGMA foreign_keys=OFF")
         for t in reversed(list(_synced_tables().values())):
-            conn.execute(text(f"DELETE FROM `{t.name}`"))
+            rc.execute(f"DELETE FROM `{t.name}`")
         for extra in ("wb_sync_rowver", "wb_sync_files", "wb_sync_state"):
-            conn.execute(text(f"DELETE FROM `{extra}`"))
+            rc.execute(f"DELETE FROM `{extra}`")
     restored = _restore_temp_data()
     _status.update({"online": False, "last_sync_at": None,
                     "last_error": None, "syncing": False})
