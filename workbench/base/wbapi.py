@@ -3420,7 +3420,7 @@ def test_model(provider: str = "deepseek", db: Session = Depends(get_db)):
 # ChromaRetriever。项目隔离 = 库映射；owner_user_id 置 None（单机无用户体系）。
 
 
-_KB_ALLOWED_EXT = {".pdf", ".docx", ".md", ".txt"}
+_KB_ALLOWED_EXT = {".pdf", ".docx", ".xlsx", ".pptx", ".md", ".txt"}
 _KB_MARKER_PREFIX = "workshop_project:"
 
 
@@ -3477,7 +3477,7 @@ def _get_project_kb(db: Session, project_id: int):
     )
     db.add(kb)
     db.commit()
-    db.refresh(kb)
+    # id 为客户端默认值（flush 时已赋），不再 refresh——避免 commit 后重开事务持锁
     return kb
 
 
@@ -3497,8 +3497,42 @@ def _load_wb_document(file_path: str):
     if ext == ".pdf":
         return get_document_processor().load_pdf(file_path)
 
-    text = ""
-    if ext == ".docx":
+    if ext == ".xlsx":
+        from openpyxl import load_workbook
+
+        wb_ = load_workbook(file_path, data_only=True, read_only=True)
+        parts = []
+        for ws in wb_.worksheets:
+            parts.append(f"[工作表] {ws.title}")
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c).strip() if c is not None else "" for c in row]
+                if any(cells):
+                    parts.append(" | ".join(cells).rstrip(" |"))
+        wb_.close()
+        text = "\n".join(parts)
+    elif ext == ".pptx":
+        from pptx import Presentation
+
+        prs = Presentation(file_path)
+        parts = []
+        for idx, slide in enumerate(prs.slides, 1):
+            parts.append(f"[第{idx}页]")
+            for shape in slide.shapes:
+                try:
+                    if getattr(shape, "has_text_frame", False):
+                        for para in shape.text_frame.paragraphs:
+                            t = "".join(run.text for run in para.runs)
+                            if t.strip():
+                                parts.append(t.strip())
+                    if getattr(shape, "has_table", False):
+                        for r in shape.table.rows:
+                            cells = [c.text.strip() for c in r.cells]
+                            if any(cells):
+                                parts.append("| " + " | ".join(cells) + " |")
+                except Exception:
+                    continue
+        text = "\n".join(parts)
+    elif ext == ".docx":
         from docx import Document as DocxDocument
 
         d = DocxDocument(file_path)
@@ -3536,6 +3570,10 @@ def _process_wb_document(file_id: str, kb_id: str):
 
 
 def _process_wb_document_inner(file_id: str, kb_id: str):
+    """三段式短事务处理，避免后台任务长期持有 SQLite 写锁：
+    ① 短事务标记 processing 并取基础信息；② 无锁状态下解析文档 + 向量化（慢操作）；
+    ③ 短事务写入分块与终态。任何阶段的锁窗口都只有毫秒级，
+    并发上传/云同步再也不会被这里阻塞出 database is locked。"""
     import logging as _logging
 
     from models.knowledge_models import KnowledgeBase, KnowledgeFile
@@ -3548,68 +3586,89 @@ def _process_wb_document_inner(file_id: str, kb_id: str):
     log = _logging.getLogger("wb.knowledge")
     from models.database import create_session
 
+    # ① 短事务：标记 processing，取解析所需的基础信息
     with create_session() as db:
-        try:
-            fr = (db.query(KnowledgeFile)
-                  .filter(KnowledgeFile.id == file_id, KnowledgeFile.knowledge_base_id == kb_id)
-                  .first())
-            if not fr:
-                log.error("知识文档记录不存在: %s", file_id)
-                return
-            fr.status = "processing"
+        fr = (db.query(KnowledgeFile)
+              .filter(KnowledgeFile.id == file_id, KnowledgeFile.knowledge_base_id == kb_id)
+              .first())
+        if not fr:
+            log.error("知识文档记录不存在: %s", file_id)
+            return
+        fr.status = "processing"
+        db.commit()
+
+        path = resolve_upload_path(fr.file_path)
+        if not path.exists():
+            db.delete(fr)
+            _refresh_kb_file_count(db, kb_id)
             db.commit()
+            log.warning("知识文档文件丢失，已清理记录: %s", fr.filename)
+            return
+        kb = db.get(KnowledgeBase, kb_id)
+        collection_name = kb.collection_name if kb else None
+        filename = fr.filename
 
-            path = resolve_upload_path(fr.file_path)
-            if not path.exists():
-                db.delete(fr)
-                _refresh_kb_file_count(db, kb_id)
-                db.commit()
-                return
+    try:
+        # ② 无锁阶段：解析 + 向量化（不持有任何数据库事务）
+        splits = _load_wb_document(str(path))
+        chunk_count, skipped = 0, 0
+        embed_ok = False
+        if splits:
+            with create_session() as db:
+                embed_ok = _ensure_embedding_ready(db) is not None
+            if embed_ok:
+                chunk_count, skipped = get_document_processor().save_to_chroma(
+                    splits=splits, collection_name=collection_name,
+                    file_metadata={"file_id": file_id, "filename": filename,
+                                   "knowledge_base_id": kb_id},
+                )
+                if chunk_count == 0:
+                    raise RuntimeError("所有分片向量化失败，未能写入向量库")
 
-            splits = _load_wb_document(str(path))
-            kb = db.get(KnowledgeBase, kb_id)
+        total = sum(1 for sp in splits if (sp.page_content or "").strip())
+        if skipped and skipped / max(1, chunk_count + skipped) >= 0.2:
+            status, error = "failed", f"{skipped}/{chunk_count + skipped} 个分片向量化失败，请重试"
+        else:
+            status = "completed"
+            error = f"{skipped}/{chunk_count + skipped} 个分片被跳过" if skipped else None
 
-            # 通道一：分块入 MySQL（关键词检索，无外部依赖、始终可用）
+        # ③ 短事务：写分块（关键词检索通道）+ 终态
+        with create_session() as db:
             db.query(wb.WbKbChunk).filter(wb.WbKbChunk.file_id == file_id).delete()
             for i, sp in enumerate(splits):
                 text = (sp.page_content or "").strip()
                 if text:
                     db.add(wb.WbKbChunk(kb_id=kb_id, file_id=file_id, chunk_no=i, content=text))
-
-            # 通道二：向量化入 Chroma（语义检索，Embedding Key 就绪时启用）
-            chunk_count, skipped = 0, 0
-            embed_ok = _ensure_embedding_ready(db) is not None
-            if embed_ok and splits:
-                chunk_count, skipped = get_document_processor().save_to_chroma(
-                    splits=splits, collection_name=kb.collection_name,
-                    file_metadata={"file_id": fr.id, "filename": fr.filename,
-                                   "knowledge_base_id": kb_id},
-                )
-                if splits and chunk_count == 0:
-                    raise RuntimeError("所有分片向量化失败，未能写入向量库")
-
-            fr.chunk_count = chunk_count or sum(1 for sp in splits if (sp.page_content or "").strip())
-            fr.skipped_chunks = skipped
-            if skipped and skipped / max(1, chunk_count + skipped) >= 0.2:
-                fr.status = "failed"
-                fr.error = f"{skipped}/{chunk_count + skipped} 个分片向量化失败，请重试"
-            else:
-                fr.status = "completed"
-                fr.error = f"{skipped}/{chunk_count + skipped} 个分片被跳过" if skipped else None
-            _refresh_kb_file_count(db, kb_id)
-            db.commit()
-            log.info("知识文档处理完成: %s, 分片 %d, 跳过 %d, 语义索引 %s",
-                     fr.filename, fr.chunk_count, skipped, "OK" if embed_ok else "未配置Key(仅关键词检索)")
-        except Exception as e:
-            db.rollback()
-            fr = (db.query(KnowledgeFile)
-                  .filter(KnowledgeFile.id == file_id, KnowledgeFile.knowledge_base_id == kb_id)
-                  .first())
+            fr = db.get(KnowledgeFile, file_id)
             if fr:
-                fr.status = "failed"
-                fr.error = str(e)[:500]
-                db.commit()
-            log.error("知识文档处理失败: %s", e, exc_info=True)
+                fr.chunk_count = chunk_count or total
+                fr.skipped_chunks = skipped
+                fr.status = status
+                fr.error = error
+                _refresh_kb_file_count(db, kb_id)
+            db.commit()
+        log.info("知识文档处理完成: %s, 分片 %d, 跳过 %d, 语义索引 %s",
+                 filename, chunk_count or total, skipped, "OK" if embed_ok else "未配置Key(仅关键词检索)")
+    except Exception as e:
+        # 短事务写失败终态（失败标记本身也要能在并发下写入）
+        marked = False
+        for attempt in range(3):
+            try:
+                with create_session() as db:
+                    fr = db.get(KnowledgeFile, file_id)
+                    if fr:
+                        fr.status = "failed"
+                        fr.error = str(e)[:500]
+                        db.commit()
+                marked = True
+                break
+            except Exception:
+                if attempt < 2:
+                    import time as _time
+                    _time.sleep(1)
+        if not marked:
+            log.error("知识文档处理失败且失败标记写入失败: %s", e, exc_info=True)
+        log.error("知识文档处理失败: %s", e, exc_info=True)
 
 
 def _process_wb_document_in_pool(file_id: str, kb_id: str):
@@ -3700,13 +3759,15 @@ def list_knowledge(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/knowledge/upload")
-async def upload_knowledge_file(
+def upload_knowledge_file(
     background_tasks: BackgroundTasks,
     project_id: int = Query(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    """上传知识文档（pdf/docx/md/txt ≤50MB），后台分块入库（Embedding Key 就绪时同步向量化）。"""
+    """上传知识文档（pdf/docx/xlsx/pptx/md/txt ≤50MB），后台分块入库（Embedding Key 就绪时同步向量化）。
+    注意：同步 endpoint（线程池执行）——SQLite 写事务在 BEGIN IMMEDIATE 模式下可能排队，
+    绝不能在事件循环线程里等待写锁。"""
     import hashlib
     import uuid as _uuid
 
@@ -3720,7 +3781,7 @@ async def upload_knowledge_file(
         raise HTTPException(400, "文件名不能为空")
     ext = Path(file.filename).suffix.lower()
     if ext not in _KB_ALLOWED_EXT:
-        raise HTTPException(400, "仅支持 PDF / Word(docx) / Markdown / TXT 文件")
+        raise HTTPException(400, "仅支持 PDF / Word(docx) / Excel(xlsx) / PPT(pptx) / Markdown / TXT 文件")
 
     kb = _get_project_kb(db, project_id)
     save_path = (get_upload_root() / f"{_uuid.uuid4().hex}{ext}").resolve()
@@ -3754,12 +3815,15 @@ async def upload_knowledge_file(
             content_hash=digest.hexdigest(),
         )
         db.add(fr)
-        db.commit()
+        # 文件计数与 INSERT 同事务原子提交；id 是客户端生成的 uuid，flush 后即可取
         _refresh_kb_file_count(db, kb.id)
-        db.refresh(fr)
+        new_id, new_name = fr.id, fr.filename
+        db.commit()
+        # commit 后不得再触碰 ORM 属性（expire_on_commit=False 虽已关闭过期，
+        # 也绝不再开新事务），否则写锁会一直握到请求收尾，与后台任务死锁
 
-        background_tasks.add_task(_process_wb_document_in_pool, fr.id, kb.id)
-        return {"id": fr.id, "filename": fr.filename}
+        background_tasks.add_task(_process_wb_document_in_pool, new_id, kb.id)
+        return {"id": new_id, "filename": new_name}
     except HTTPException:
         if save_path.exists():
             save_path.unlink()
@@ -3768,6 +3832,29 @@ async def upload_knowledge_file(
         if save_path.exists():
             save_path.unlink()
         raise HTTPException(500, f"上传失败: {e}")
+
+
+@router.get("/knowledge/files/{file_id}/download")
+def download_knowledge_file(file_id: str, project_id: int, db: Session = Depends(get_db)):
+    """下载知识库原始文件（attachment 方式，带原文件名）。"""
+    from fastapi.responses import FileResponse
+
+    from models.knowledge_models import KnowledgeBase, KnowledgeFile
+    from services.knowledge_service import resolve_upload_path
+
+    kb = _get_project_kb(db, project_id)
+    fr = (db.query(KnowledgeFile)
+          .filter(KnowledgeFile.id == file_id, KnowledgeFile.knowledge_base_id == kb.id)
+          .first())
+    if not fr:
+        raise HTTPException(404, "文档不存在")
+    try:
+        path = resolve_upload_path(fr.file_path)
+    except HTTPException:
+        raise HTTPException(404, "文档不存在")
+    if not path.exists():
+        raise HTTPException(404, "文件已丢失，请重新上传")
+    return FileResponse(path, filename=fr.filename, media_type="application/octet-stream")
 
 
 @router.delete("/knowledge/files/{file_id}")

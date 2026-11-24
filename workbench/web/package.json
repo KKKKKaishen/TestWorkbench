@@ -9,9 +9,13 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
+    "docx-preview": "^0.4.1",
     "element-plus": "^2.8.8",
+    "pdfjs-dist": "^6.5.438",
+    "pptx-preview": "^1.0.7",
     "vue": "^3.5.13",
-    "vue-router": "^4.5.0"
+    "vue-router": "^4.5.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",

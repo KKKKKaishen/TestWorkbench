@@ -3,7 +3,7 @@
 
 #define MyAppName "Cyu工作台"
 #define MyAppNameEn "CyuWorkshop"
-#define MyAppVersion "2.2.2"
+#define MyAppVersion "2.2.3"
 
 [Setup]
 AppId={{8C7F3A52-6B1D-4E8A-9C3F-2E5A7D0B9C11}

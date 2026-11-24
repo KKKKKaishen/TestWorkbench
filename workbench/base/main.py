@@ -20,6 +20,17 @@ from config import get_app_env, get_session_secret_key  # noqa: E402
 from models.database import init_db  # noqa: E402
 from wbapi import router as wb_router  # noqa: E402
 
+if WB_LITE:
+    # 精简模式同样要注册全部 ORM 模型：任一 /wb 查询触发 configure_mappers 时
+    # 需要解析跨模型 relationship（如 Conversation→User、knowledge_bases→User），
+    # 缺一个模型类就 500（"One or more mappers failed to initialize"）
+    import models.api_test_models  # noqa: F401,E402
+    import models.chat  # noqa: F401,E402
+    import models.knowledge_models  # noqa: F401,E402
+    import models.test_asset_models  # noqa: F401,E402
+    import models.user  # noqa: F401,E402
+    import models.workflow_models  # noqa: F401,E402
+
 if not WB_LITE:
     from api.api_v1 import api_router
     from api.endpoints import auth, chat, knowledge_api, testbench_api, workflow_api

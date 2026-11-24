@@ -22,7 +22,7 @@
             <el-icon><Upload /></el-icon>上传文档
           </el-button>
         </el-upload>
-        <span class="muted" style="font-size:12px">支持 PDF / Word(docx) / Markdown / TXT，≤50MB，上传后自动向量化</span>
+        <span class="muted" style="font-size:12px">支持 PDF / Word(docx) / Excel(xlsx) / PPT(pptx) / Markdown / TXT，≤50MB，上传后自动向量化</span>
         <div style="flex:1" />
         <span v-if="kbFiles.length" class="muted" style="font-size:12px">
           {{ kbFiles.length }} 个文档 · {{ totalChunks }} 个分片
@@ -58,9 +58,11 @@
         <el-table-column label="上传时间" width="160">
           <template #default="{ row }">{{ fmtTime(row.uploaded_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="190">
+        <el-table-column label="操作" width="280">
           <template #default="{ row }">
             <div class="op-line">
+              <el-button link type="primary" size="small" @click="previewFile(row)">预览</el-button>
+              <el-button link type="primary" size="small" @click="downloadFile(row)">下载</el-button>
               <el-button v-if="row.status === 'failed' || row.status === 'pending'" link type="primary" size="small" @click="retryFile(row)">重试</el-button>
               <el-button v-if="row.status === 'completed'" link type="primary" size="small" @click="reindexFile(row)">重建索引</el-button>
               <el-button link type="danger" size="small" @click="removeFile(row)">删除</el-button>
@@ -94,17 +96,50 @@
           <el-icon><Document /></el-icon>
           <span class="sr-source">{{ r.source }}</span>
           <el-tag v-if="r.page" size="small" effect="plain">第 {{ r.page }} 页</el-tag>
+          <div style="flex:1" />
+          <el-tooltip content="一键复制内容" placement="top">
+            <el-button link size="small" class="sr-copy" @click="copyResult(r)">
+              <el-icon><CopyDocument /></el-icon>
+              <span style="margin-left:2px">复制</span>
+            </el-button>
+          </el-tooltip>
         </div>
         <div class="sr-content">{{ r.content }}</div>
       </div>
     </div>
+
+    <!-- 全屏文件预览 -->
+    <el-dialog
+      v-model="previewVisible" :title="previewRow?.filename || '文件预览'"
+      fullscreen destroy-on-close class="kb-preview-dialog"
+    >
+      <div class="preview-wrap">
+        <div v-if="previewLoading" class="preview-tip">
+          <el-icon class="is-loading" :size="26"><Loading /></el-icon>
+          <span style="margin-left:8px">正在加载预览…</span>
+        </div>
+        <div v-else-if="previewError" class="preview-tip">
+          <span style="color: var(--el-color-danger)">{{ previewError }}</span>
+        </div>
+        <div v-show="!previewLoading && !previewError" class="preview-inner">
+          <div v-if="previewKind === 'xlsx' && sheetList.length" class="sheet-tabs">
+            <el-tag
+              v-for="(s, i) in sheetList" :key="s.name" size="small"
+              :effect="i === activeSheet ? 'dark' : 'plain'" class="sheet-tag"
+              @click="switchSheet(i)"
+            >{{ s.name }}</el-tag>
+          </div>
+          <div ref="previewBox" class="preview-box" />
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Upload, Search, Document, Loading } from '@element-plus/icons-vue'
+import { Upload, Search, Document, Loading, CopyDocument } from '@element-plus/icons-vue'
 import { get, post, del } from '../api'
 
 const projects = ref([])
@@ -226,6 +261,191 @@ async function doSearch() {
   }
 }
 
+async function copyResult(r) {
+  const text = r.content || ''
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    // 非安全上下文等场景的兜底方案
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    try {
+      document.execCommand('copy')
+      ElMessage.success('已复制到剪贴板')
+    } catch {
+      ElMessage.error('复制失败，请手动选择复制')
+    }
+    ta.remove()
+  }
+}
+
+// ---- 预览 / 下载 ----
+const previewVisible = ref(false)
+const previewRow = ref(null)
+const previewLoading = ref(false)
+const previewError = ref('')
+const previewKind = ref('')
+const previewBox = ref(null)
+const sheetList = ref([])
+const activeSheet = ref(0)
+
+function previewKindOf(name) {
+  const ext = String(name || '').split('.').pop().toLowerCase()
+  if (ext === 'pdf') return 'pdf'
+  if (ext === 'docx') return 'docx'
+  if (ext === 'xlsx') return 'xlsx'
+  if (ext === 'pptx') return 'pptx'
+  if (ext === 'md' || ext === 'txt') return 'text'
+  return ''
+}
+
+function fileUrl(row) {
+  return `/wb/knowledge/files/${row.id}/download?project_id=${projectId.value}`
+}
+
+async function fetchFileBuffer(row) {
+  const res = await fetch(fileUrl(row))
+  if (!res.ok) {
+    let detail = res.statusText
+    try { detail = (await res.json()).detail || detail } catch { /* ignore */ }
+    throw new Error(detail)
+  }
+  return res.arrayBuffer()
+}
+
+async function previewFile(row) {
+  const kind = previewKindOf(row.filename)
+  if (!kind) {
+    ElMessage.warning('该文件类型暂不支持预览，可下载后本地查看')
+    return
+  }
+  previewRow.value = row
+  previewKind.value = kind
+  previewError.value = ''
+  previewLoading.value = true
+  previewVisible.value = true
+  await nextTick()
+  try {
+    const buf = await fetchFileBuffer(row)
+    if (kind === 'pdf') await renderPdf(buf)
+    else if (kind === 'docx') await renderDocx(buf)
+    else if (kind === 'xlsx') await renderXlsx(buf)
+    else if (kind === 'pptx') await renderPptx(buf)
+    else renderText(buf)
+  } catch (e) {
+    console.error('预览失败', e)
+    previewError.value = '预览失败：' + (e?.message || e)
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+async function renderPdf(buf) {
+  const box = previewBox.value
+  box.innerHTML = ''
+  box.style.display = 'block'
+  const pdfjs = await import('pdfjs-dist')
+  if (!pdfjs.GlobalWorkerOptions.workerSrc) {
+    pdfjs.GlobalWorkerOptions.workerSrc = (await import('pdfjs-dist/build/pdf.worker.min.mjs?url')).default
+  }
+  const doc = await pdfjs.getDocument({ data: buf }).promise
+  const width = Math.max(320, box.clientWidth - 24)
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i)
+    const base = page.getViewport({ scale: 1 })
+    const scale = Math.min(2, width / base.width)
+    const vp = page.getViewport({ scale })
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.floor(vp.width)
+    canvas.height = Math.floor(vp.height)
+    canvas.className = 'pdf-page'
+    box.appendChild(canvas)
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise
+  }
+}
+
+async function renderDocx(buf) {
+  const box = previewBox.value
+  box.innerHTML = ''
+  const { renderAsync } = await import('docx-preview')
+  await renderAsync(buf, box, null, {
+    inWrapper: true,
+    ignoreLastRenderedPageBreak: true,
+    experimental: true,
+  })
+}
+
+async function renderXlsx(buf) {
+  const box = previewBox.value
+  const XLSX = await import('xlsx')
+  const wb = XLSX.read(buf, { type: 'array' })
+  sheetList.value = wb.SheetNames.map(name => ({
+    name,
+    html: XLSX.utils.sheet_to_html(wb.Sheets[name]),
+  }))
+  activeSheet.value = 0
+  await nextTick()
+  box.innerHTML = sheetList.value[0]?.html || '<p>空表格</p>'
+}
+
+function switchSheet(i) {
+  activeSheet.value = i
+  previewBox.value.innerHTML = sheetList.value[i]?.html || ''
+}
+
+async function renderPptx(buf) {
+  const box = previewBox.value
+  box.innerHTML = ''
+  const { init } = await import('pptx-preview')
+  const previewer = init(box, {
+    width: Math.max(320, box.clientWidth - 16),
+    height: Math.max(240, box.clientHeight - 16),
+  })
+  await previewer.preview(buf)
+}
+
+function renderText(buf) {
+  const box = previewBox.value
+  box.innerHTML = ''
+  const pre = document.createElement('pre')
+  pre.className = 'text-view'
+  pre.textContent = new TextDecoder('utf-8').decode(buf)
+  box.appendChild(pre)
+}
+
+async function downloadFile(row) {
+  const url = fileUrl(row)
+  if (window.pywebview?.api?.download_file) {
+    // 客户端模式：壳进程直接写入系统默认下载目录（无弹窗）
+    try {
+      const saved = await window.pywebview.api.download_file(url, row.filename)
+      ElMessage.success('已保存到下载目录：' + saved)
+    } catch (e) {
+      ElMessage.error('下载失败：' + (e?.message || e))
+    }
+    return
+  }
+  try {
+    // 浏览器模式：blob 锚点下载
+    const res = await fetch(url)
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const blob = await res.blob()
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = row.filename
+    a.click()
+    URL.revokeObjectURL(a.href)
+    ElMessage.success('已开始下载')
+  } catch (e) {
+    ElMessage.error('下载失败：' + e.message)
+  }
+}
+
 function fmtSize(n) {
   if (!n) return '—'
   if (n < 1024) return n + ' B'
@@ -247,6 +467,63 @@ function fmtTime(t) {
 .search-line .el-input { flex: 1; }
 .search-result { border: 1px solid var(--wb-border, #e5e7eb); border-radius: 8px; padding: 10px 14px; margin-top: 10px; background: #f8fafc; }
 .sr-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--wb-text-sub, #64748b); margin-bottom: 6px; }
+.sr-copy { color: var(--wb-text-sub, #64748b); }
+.sr-copy:hover { color: var(--el-color-primary); }
 .sr-source { font-weight: 600; }
 .sr-content { font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow-y: auto; }
+</style>
+
+<!-- 预览弹窗样式：el-dialog teleport 到 body，需全局样式块 -->
+<style>
+.kb-preview-dialog .el-dialog__header {
+  border-bottom: 1px solid var(--wb-border, #e5e7eb);
+  margin-right: 0;
+  padding: 14px 20px;
+}
+.kb-preview-dialog .el-dialog__title {
+  font-size: 15px;
+  font-weight: 600;
+  max-width: calc(100% - 60px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+.kb-preview-dialog .el-dialog__body { padding: 0; height: calc(100vh - 55px); overflow: hidden; }
+.kb-preview-dialog .preview-wrap { position: relative; height: 100%; display: flex; flex-direction: column; background: #f1f3f6; }
+.kb-preview-dialog .preview-inner { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.kb-preview-dialog .preview-tip {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  gap: 4px; font-size: 14px; color: var(--wb-text-sub, #64748b);
+}
+.kb-preview-dialog .sheet-tabs {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 8px 16px;
+  background: #fff;
+  border-bottom: 1px solid var(--wb-border, #e5e7eb);
+}
+.kb-preview-dialog .sheet-tag { cursor: pointer; }
+.kb-preview-dialog .preview-box {
+  flex: 1; overflow: auto; padding: 16px;
+  box-sizing: border-box;
+}
+.kb-preview-dialog .preview-box .pdf-page {
+  display: block; margin: 0 auto 12px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+}
+.kb-preview-dialog .preview-box .text-view {
+  margin: 0 auto; max-width: 860px;
+  background: #fff; border-radius: 8px; padding: 24px;
+  font-size: 13px; line-height: 1.8; white-space: pre-wrap; word-break: break-word;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+.kb-preview-dialog .preview-box table { border-collapse: collapse; background: #fff; }
+.kb-preview-dialog .preview-box table td {
+  border: 1px solid #d9dee5; padding: 3px 8px;
+  font-size: 12px; color: #333;
+  white-space: nowrap; max-width: 260px;
+  overflow: hidden; text-overflow: ellipsis;
+}
 </style>

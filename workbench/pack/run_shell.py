@@ -15,6 +15,7 @@ from pathlib import Path
 
 import webview
 
+webview.settings["ALLOW_DOWNLOADS"] = True  # 允许 WebView2 内触发下载（保存对话框默认定位到下载目录）
 PORT = int(os.getenv("WORKBENCH_PORT", "8901"))
 URL = f"http://127.0.0.1:{PORT}/app/"
 HEALTH = f"http://127.0.0.1:{PORT}/"
@@ -62,6 +63,76 @@ class WindowApi:
 
     def close(self):
         window.destroy()
+
+    def download_file(self, url, filename):
+        """从本地服务下载文件到系统默认下载目录（无弹窗，重名自动加序号）。
+        返回保存路径；失败抛异常（pywebview 会转成前端 Promise 拒绝）。"""
+        import urllib.error
+
+        dest_dir = Path.home() / "Downloads"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = Path(filename).name or "download"
+        dest = dest_dir / safe_name
+        stem, suffix = dest.stem, dest.suffix
+        i = 1
+        while dest.exists():
+            dest = dest_dir / f"{stem} ({i}){suffix}"
+            i += 1
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(url, timeout=60) as resp, open(dest, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        except urllib.error.HTTPError as e:
+            _log(f"download_file HTTP错误 code={e.code} url={url}")
+            raise RuntimeError(f"下载失败（HTTP {e.code}）") from e
+        except Exception as e:
+            _log(f"download_file 异常: {e}")
+            raise RuntimeError(f"下载失败: {e}") from e
+        _log(f"download_file 完成: {dest}")
+        return str(dest)
+
+
+def _patch_window():
+    """无边框窗口行为修复：
+    1) MaximizedBounds 限定为工作区（屏幕减去任务栏）→ 最大化不再遮挡任务栏；
+    2) 补 WS_SYSMENU/WS_MINIMIZEBOX/WS_MAXIMIZEBOX 样式 → 任务栏图标点击可最小化/还原。"""
+    import ctypes
+
+    from System.Drawing import Rectangle
+    from System.Windows.Forms import Screen
+
+    try:
+        form = window.native
+        if form is None:
+            _log("窗口行为修复跳过：native 窗体未就绪")
+            return
+        # 1) 最大化边界 = 工作区
+        area = Screen.FromControl(form).WorkingArea
+        form.MaximizedBounds = Rectangle(area.X, area.Y, area.Width, area.Height)
+        # 2) 补窗口样式（不改变无边框外观，仅恢复任务栏交互行为）
+        GWL_STYLE = -16
+        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU = 0x10000, 0x20000, 0x80000
+        SWP_NOSIZE, SWP_NOMOVE = 0x1, 0x2
+        SWP_NOZORDER, SWP_FRAMECHANGED = 0x4, 0x20
+        user32 = ctypes.windll.user32
+        hwnd = form.Handle.ToInt64()
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        user32.SetWindowLongW(
+            hwnd, GWL_STYLE,
+            style | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU,
+        )
+        user32.SetWindowPos(
+            hwnd, 0, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        )
+        _log("窗口行为修复完成（MaximizedBounds=工作区 + 任务栏样式）")
+    except Exception:
+        import traceback
+        _log("窗口行为修复失败:\n" + traceback.format_exc())
 
 
 def _reachable(url, timeout=2):
@@ -138,6 +209,7 @@ def main():
             js_api=WindowApi(),    # 前端自绘标题栏的最小化/最大化/关闭
         )
         _log("窗口已创建，进入事件循环")
+        window.events.loaded += lambda *args: _patch_window()
     except Exception:
         import traceback
         _log("启动异常:\n" + traceback.format_exc())

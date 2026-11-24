@@ -21,7 +21,9 @@ from config import (
 logger = logging.getLogger(__name__)
 
 Base = declarative_base()
-SessionLocal = sessionmaker(autocommit=False, autoflush=False)
+# expire_on_commit=False：commit 后访问属性不再触发隐藏的重新 SELECT（那会
+# 在 BEGIN IMMEDIATE 模式下重新拿到写锁且直到请求收尾才释放，与后台任务死锁）
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False)
 engine: Engine | None = None
 
 # 长文本列的统一类型：MySQL 用 MEDIUMTEXT（16MB），其余方言（含 SQLite 测试）保持 TEXT。
@@ -80,6 +82,28 @@ def _create_engine(database_url: str) -> Engine:
             cur.execute("PRAGMA busy_timeout=30000")
             cur.execute("PRAGMA synchronous=NORMAL")
             cur.close()
+            # 禁用 pysqlite 隐式 deferred BEGIN，改由下方 begin 事件发 BEGIN IMMEDIATE
+            # （SQLAlchemy 官方配方：否则"先读后写"会话升级锁会绕过 busy_timeout）
+            dbapi_conn.isolation_level = None
+
+        @event.listens_for(eng, "begin")
+        def _sqlite_begin_immediate(conn):
+            """用 BEGIN IMMEDIATE 取代 deferred BEGIN：写事务一开始就取写锁，
+            busy_timeout 才能生效排队。否则"先读后写"的会话在并发写入时尝试
+            从读快照升级为写锁会立即报 database is locked（busy handler 不介入
+            升级路径，知识库上传连发即触发）。"""
+            import logging as _lg
+            import threading as _th
+            import time as _t
+
+            _t0 = _t.perf_counter()
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            _dt = _t.perf_counter() - _t0
+            if _dt > 0.5:
+                _lg.getLogger("wb.sqlite").warning(
+                    "BEGIN IMMEDIATE 等待 %.1fs 线程=%s（写锁被长事务占用）",
+                    _dt, _th.current_thread().name,
+                )
 
         return eng
 
