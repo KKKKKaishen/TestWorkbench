@@ -3304,6 +3304,16 @@ def upsert_setting(body: SettingBody, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+@router.delete("/settings")
+def delete_setting(setting_key: str, db: Session = Depends(get_db)):
+    """删除一条配置（设置页"删除"按钮；配置项删除后回落为未配置占位行）。"""
+    s = db.query(wb.WbSetting).filter(wb.WbSetting.setting_key == setting_key).first()
+    if s:
+        db.delete(s)
+        db.commit()
+    return {"ok": True}
+
+
 @router.get("/settings/reveal")
 def reveal_setting(setting_key: str, db: Session = Depends(get_db)):
     """解密回显（仅本地单用户场景；用于"测试连通"时读取 key）。"""
@@ -4197,8 +4207,30 @@ class AiProviderBody(BaseModel):
     protocol: str = "openai_chat"
     base_url: str | None = None
     api_key: str | None = None        # 明文入参（加密存储，不回显）
-    models: list[str] = []
+    models: list = []                 # 条目为 str（旧格式）或 {id,name,ctx,out,input}
     enabled: int = 1
+
+
+def _norm_provider_models(models) -> list[dict]:
+    """归一化模型目录：str → {id: s}；dict → 仅保留约定键，缺 id 的丢弃。"""
+    out = []
+    for m in models or []:
+        if isinstance(m, str):
+            if m.strip():
+                out.append({"id": m.strip(), "name": "", "ctx": "", "out": "", "input": ["text"]})
+        elif isinstance(m, dict):
+            mid = str(m.get("id") or "").strip()
+            if not mid:
+                continue
+            inputs = [x for x in (m.get("input") or ["text"]) if x in ("text", "image")] or ["text"]
+            out.append({
+                "id": mid,
+                "name": str(m.get("name") or "").strip(),
+                "ctx": str(m.get("ctx") or "").strip(),
+                "out": str(m.get("out") or "").strip(),
+                "input": inputs,
+            })
+    return out
 
 
 @router.get("/ai-providers/catalog")
@@ -4256,7 +4288,9 @@ def _apply_provider_legacy_settings(db: Session, p) -> None:
         _up("ai.local.base_url", p.base_url, 0, "AI 提供商端点（自定义模型 API）")
         _up("ai.local.api_key", key_plain, 1, "AI 提供商密钥（自定义模型 API）")
         if p.models:
-            _up("ai.local.model", p.models[0], 0, "AI 提供商默认模型")
+            _first = p.models[0]
+            _first_id = _first.get("id") if isinstance(_first, dict) else _first
+            _up("ai.local.model", _first_id, 0, "AI 提供商默认模型")
 
 
 @router.post("/ai-providers")
@@ -4282,7 +4316,7 @@ def ai_provider_create(body: AiProviderBody, db: Session = Depends(get_db)):
         base_url=(body.base_url or "").strip() or None,
         api_key_enc=(_provider_cipher().encrypt(body.api_key.encode()).decode()
                      if body.api_key else None),
-        models=[m for m in (body.models or []) if m and m.strip()], enabled=body.enabled)
+        models=_norm_provider_models(body.models), enabled=body.enabled)
     db.add(p)
     db.commit()
     _apply_provider_legacy_settings(db, p)
@@ -4301,7 +4335,7 @@ def ai_provider_update(pid: int, body: AiProviderBody, db: Session = Depends(get
     if body.api_key:
         p.api_key_enc = _provider_cipher().encrypt(body.api_key.encode()).decode()
     if body.models is not None:
-        p.models = [m for m in body.models if m and m.strip()]
+        p.models = _norm_provider_models(body.models)
     p.enabled = body.enabled
     db.commit()
     _apply_provider_legacy_settings(db, p)
@@ -4367,7 +4401,9 @@ def ai_provider_test(pid: int, db: Session = Depends(get_db)):
         except Exception:
             key = ""
     base = (p.base_url or "").strip().rstrip("/")
-    model = (p.models or ["ping"])[0] if p.models else "ping"
+    _models = p.models or []
+    model = (_models[0].get("id") if isinstance(_models[0], dict) else _models[0]) \
+        if _models else "ping"
     if p.protocol == "anthropic":
         if not base:
             raise HTTPException(400, "该提供商未配置 API 地址")

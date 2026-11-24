@@ -105,6 +105,7 @@
               <el-button size="small" link :loading="testing === row.setting_key"
                          :disabled="row.setting_key === 'ai.local.api_key'"
                          @click="testConn(row)">测试连通</el-button>
+              <el-button size="small" link type="danger" @click="removeSetting(row)">删除</el-button>
             </template>
           </template>
         </el-table-column>
@@ -128,7 +129,7 @@
           <el-table-column prop="base_url" label="API 地址" min-width="220" show-overflow-tooltip />
           <el-table-column label="模型目录" min-width="200">
             <template #default="{ row }">
-              <el-tag v-for="m in row.models.slice(0, 3)" :key="m" size="small" style="margin-right:4px" effect="plain">{{ m }}</el-tag>
+              <el-tag v-for="m in row.models.slice(0, 3)" :key="modelId(m)" size="small" style="margin-right:4px" effect="plain">{{ modelId(m) }}</el-tag>
               <span v-if="row.models.length > 3" class="muted">+{{ row.models.length - 3 }}</span>
               <span v-if="!row.models.length" class="muted">未配置（目录外 ID 可直接发送）</span>
             </template>
@@ -145,91 +146,110 @@
     </div>
 
     <!-- 新增模型提供商弹窗 -->
-    <el-dialog v-model="providerDialog" title="新增模型提供商" width="640px" destroy-on-close>
-      <el-tabs v-model="providerTab">
-        <!-- Tab 1：第三方模型提供商 -->
-        <el-tab-pane label="第三方模型提供商" name="builtin">
-          <div class="muted mb12">
-            从内置目录中选择 OpenAI、Anthropic、Kimi 等提供商，填入其 API 密钥即可使用。
-          </div>
-          <el-form label-position="top" size="small">
-            <el-form-item label="提供商">
-              <el-select v-model="builtinForm.catalog_slug" style="width: 320px" @change="onCatalogChange">
-                <el-option v-for="c in catalog" :key="c.slug" :value="c.slug" :label="c.name" />
-              </el-select>
-            </el-form-item>
-            <el-form-item>
-              <template #label>
-                <span>API 密钥</span>
-                <el-tooltip placement="top" content="密钥加密存储，同步到其他设备后仍可解密使用">
-                  <span class="q-mark">?</span>
-                </el-tooltip>
-              </template>
-              <el-input v-model="builtinForm.api_key" type="password" show-password
-                        :placeholder="curCatalog.env_key ? `留空使用环境认证（${curCatalog.env_key}）` : '输入 API 密钥'" />
-              <div v-if="curCatalog.env_key && !curCatalog.env_key_detected" class="env-hint">
-                未检测到环境变量。请填写 API 密钥，或设置环境变量 {{ curCatalog.env_key }}。
+    <el-dialog v-model="providerDialog" width="680px" destroy-on-close class="provider-dialog">
+      <template #header>
+        <div class="pd-title">新增模型提供商</div>
+      </template>
+
+      <!-- 分段式胶囊 Tab -->
+      <div class="seg-tabs">
+        <button :class="['seg-btn', providerTab === 'builtin' ? 'active' : '']" type="button"
+                @click="providerTab = 'builtin'">第三方模型提供商</button>
+        <button :class="['seg-btn', providerTab === 'custom' ? 'active' : '']" type="button"
+                @click="providerTab = 'custom'">自定义模型 API</button>
+      </div>
+
+      <!-- Tab 1：第三方模型提供商 -->
+      <template v-if="providerTab === 'builtin'">
+        <div class="pd-desc">
+          从内置目录中选择 OpenAI、Anthropic、Kimi 等提供商，填入其 API 密钥即可使用。
+        </div>
+        <el-form label-position="top" size="small" class="pd-form">
+          <el-form-item label="提供商">
+            <el-select v-model="builtinForm.catalog_slug" style="width: 360px" @change="onCatalogChange">
+              <el-option v-for="c in catalog" :key="c.slug" :value="c.slug" :label="c.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item>
+            <template #label>
+              <span>API 密钥</span>
+              <el-tooltip placement="top" content="密钥加密存储，同步到其他设备后仍可解密使用">
+                <span class="q-mark">?</span>
+              </el-tooltip>
+            </template>
+            <el-input v-model="builtinForm.api_key" type="password" show-password
+                      :placeholder="curCatalog.env_key ? `留空使用环境认证（${curCatalog.env_key}）` : '输入 API 密钥'" />
+            <div v-if="curCatalog.env_key && !curCatalog.env_key_detected" class="env-hint">
+              未检测到环境变量。请填写 API 密钥，或设置环境变量 {{ curCatalog.env_key }}。
+            </div>
+            <div v-else-if="curCatalog.env_key && curCatalog.env_key_detected" class="env-hint ok">
+              已检测到环境变量 {{ curCatalog.env_key }}，可留空。
+            </div>
+          </el-form-item>
+
+          <el-collapse v-model="builtinAdvanced" class="adv-collapse">
+            <el-collapse-item title="自定义设置" name="adv">
+              <el-form-item label="API 地址">
+                <el-input v-model="builtinForm.base_url" :placeholder="curCatalog.base_url || '由提供方配置地址'" />
+              </el-form-item>
+              <div v-if="curCatalog.addr_hint" class="pd-field-hint">
+                提供方地址配置：{{ curCatalog.addr_hint }}
               </div>
-              <div v-else-if="curCatalog.env_key && curCatalog.env_key_detected" class="env-hint ok">
-                已检测到环境变量 {{ curCatalog.env_key }}，可留空。
-              </div>
-            </el-form-item>
+              <div class="adv-divider"></div>
+              <model-catalog-editor v-model="builtinForm.models"
+                                    :base-url="builtinForm.base_url || curCatalog.base_url"
+                                    :protocol="curCatalog.protocol" :api-key="builtinForm.api_key"
+                                    :default-models="curCatalog.models || []" />
+            </el-collapse-item>
+          </el-collapse>
+        </el-form>
+      </template>
 
-            <el-collapse v-model="builtinAdvanced" class="adv-collapse">
-              <el-collapse-item title="自定义设置" name="adv">
-                <el-form-item label="API 地址">
-                  <el-input v-model="builtinForm.base_url" :placeholder="curCatalog.base_url || '由提供方配置地址'" />
-                </el-form-item>
-                <div v-if="curCatalog.addr_hint" class="muted" style="margin-top:-10px;margin-bottom:12px;font-size:12px">
-                  提供方地址配置：{{ curCatalog.addr_hint }}
-                </div>
-              </el-collapse-item>
-            </el-collapse>
+      <!-- Tab 2：自定义模型 API -->
+      <template v-else>
+        <div class="pd-desc">
+          连接中转站、自部署服务或其他兼容 OpenAI / Anthropic 协议的接口，需填写 API 地址、协议和模型。
+        </div>
+        <el-form label-position="top" size="small" class="pd-form">
+          <el-form-item label="Provider ID">
+            <el-input v-model="customForm.provider_id" placeholder="acme-gateway" />
+            <div class="pd-field-hint">以小写字母开头的标识，在请求中唯一标识该提供商，并用于派生凭据名。</div>
+          </el-form-item>
+          <el-form-item label="显示名称">
+            <el-input v-model="customForm.display_name" placeholder="显示名称" />
+          </el-form-item>
+          <el-form-item label="API 地址">
+            <el-input v-model="customForm.base_url" placeholder="https://gateway.example/v1" />
+          </el-form-item>
+          <el-form-item label="API 协议">
+            <el-select v-model="customForm.protocol" style="width: 360px">
+              <el-option value="openai_chat" label="OpenAI Chat Completions" />
+              <el-option value="openai_responses" label="OpenAI Responses" />
+              <el-option value="anthropic" label="Anthropic Messages" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="API 密钥">
+            <el-input v-model="customForm.api_key" type="password" show-password placeholder="输入 API 密钥" />
+          </el-form-item>
 
-            <model-catalog-editor v-model="builtinForm.models" :base-url="builtinForm.base_url || curCatalog.base_url"
-                                  :protocol="curCatalog.protocol" :api-key="builtinForm.api_key" />
-          </el-form>
-          <template #footer>
-            <el-button @click="providerDialog = false">取消</el-button>
-            <el-button type="primary" :loading="providerSaving" @click="saveBuiltinProvider">保存</el-button>
-          </template>
-        </el-tab-pane>
+          <el-collapse v-model="customAdvanced" class="adv-collapse">
+            <el-collapse-item title="自定义设置" name="adv">
+              <model-catalog-editor v-model="customForm.models" :base-url="customForm.base_url"
+                                    :protocol="customForm.protocol" :api-key="customForm.api_key" />
+            </el-collapse-item>
+          </el-collapse>
+        </el-form>
+      </template>
 
-        <!-- Tab 2：自定义模型 API -->
-        <el-tab-pane label="自定义模型 API" name="custom">
-          <div class="muted mb12">
-            连接中转站、自部署服务或其他兼容 OpenAI / Anthropic 协议的接口，需填写 API 地址、协议和模型。
-          </div>
-          <el-form label-position="top" size="small">
-            <el-form-item label="Provider ID">
-              <el-input v-model="customForm.provider_id" placeholder="acme-gateway" />
-              <div class="muted" style="font-size:12px">以小写字母开头的标识，在请求中唯一标识该提供商，并用于派生凭据名。</div>
-            </el-form-item>
-            <el-form-item label="显示名称">
-              <el-input v-model="customForm.display_name" placeholder="显示名称" />
-            </el-form-item>
-            <el-form-item label="API 地址">
-              <el-input v-model="customForm.base_url" placeholder="https://gateway.example/v1" />
-            </el-form-item>
-            <el-form-item label="API 协议">
-              <el-select v-model="customForm.protocol" style="width: 320px">
-                <el-option value="openai_chat" label="OpenAI Chat Completions" />
-                <el-option value="openai_responses" label="OpenAI Responses" />
-                <el-option value="anthropic" label="Anthropic Messages" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="API 密钥">
-              <el-input v-model="customForm.api_key" type="password" show-password placeholder="输入 API 密钥" />
-            </el-form-item>
-            <model-catalog-editor v-model="customForm.models" :base-url="customForm.base_url"
-                                  :protocol="customForm.protocol" :api-key="customForm.api_key" />
-          </el-form>
-          <template #footer>
-            <el-button @click="providerDialog = false">取消</el-button>
-            <el-button type="primary" :loading="providerSaving" @click="saveCustomProvider">创建提供商</el-button>
-          </template>
-        </el-tab-pane>
-      </el-tabs>
+      <template #footer>
+        <div class="pd-footer">
+          <el-button class="btn-ghost" @click="providerDialog = false">取消</el-button>
+          <el-button v-if="providerTab === 'builtin'" class="btn-dark" :loading="providerSaving"
+                     @click="saveBuiltinProvider">保存</el-button>
+          <el-button v-else class="btn-dark" :loading="providerSaving"
+                     @click="saveCustomProvider">创建提供商</el-button>
+        </div>
+      </template>
     </el-dialog>
 
     <div class="card mb16">
@@ -275,10 +295,16 @@
 
 <script setup>
 import { defineComponent, h, onMounted, onUnmounted, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElCheckbox, ElInput, ElIcon, ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown, ArrowUp, Delete } from '@element-plus/icons-vue'
 import { get, post, put, del } from '../api'
 
-// ---------- 模型目录编辑器（弹窗内复用的小组件） ----------
+// ---------- 模型目录编辑器（卡片式：ID/显示名称/上下文窗口/最大输出/输入类型） ----------
+const normEntry = (m) => (typeof m === 'string'
+  ? { id: m, name: '', ctx: '', out: '', input: ['text'] }
+  : { id: m?.id || '', name: m?.name || '', ctx: m?.ctx || '', out: m?.out || '', input: Array.isArray(m?.input) ? m.input : ['text'] })
+const modelId = (m) => (typeof m === 'string' ? m : (m && m.id) || '')
+
 const ModelCatalogEditor = defineComponent({
   name: 'ModelCatalogEditor',
   props: {
@@ -286,24 +312,48 @@ const ModelCatalogEditor = defineComponent({
     baseUrl: { type: String, default: '' },
     protocol: { type: String, default: 'openai_chat' },
     apiKey: { type: String, default: '' },
+    defaultModels: { type: Array, default: () => [] },   // 内置目录默认模型（"恢复默认模型"用）
   },
   emits: ['update:modelValue'],
   setup(props, { emit }) {
     const probing = ref(false)
-    const addModel = async () => {
-      try {
-        const r = await ElMessageBox.prompt('输入模型 ID（如 gpt-4o-mini）', '添加模型',
-          { inputPattern: /\S/, inputErrorMessage: '模型 ID 不能为空' })
-        const v = (r.value || '').trim()
-        if (v && !props.modelValue.includes(v)) emit('update:modelValue', [...props.modelValue, v])
-      } catch (e) { /* 取消 */ }
+    const expanded = ref(-1)   // 当前展开的卡片下标（手风琴式）
+
+    const entries = () => props.modelValue.map(normEntry)
+    const setEntry = (i, patch) => {
+      const next = entries()
+      next[i] = { ...next[i], ...patch }
+      emit('update:modelValue', next)
+    }
+    const removeEntry = (i) => {
+      const next = entries()
+      next.splice(i, 1)
+      if (expanded.value === i) expanded.value = -1
+      else if (expanded.value > i) expanded.value -= 1
+      emit('update:modelValue', next)
+    }
+    const toggleInput = (i, kind, on) => {
+      const cur = new Set(entries()[i].input)
+      if (on) cur.add(kind); else cur.delete(kind)
+      setEntry(i, { input: [...cur] })
+    }
+    const addModel = () => {
+      const next = entries()
+      next.push({ id: '', name: '', ctx: '', out: '', input: ['text'] })
+      expanded.value = next.length - 1
+      emit('update:modelValue', next)
+    }
+    const restoreDefaults = () => {
+      expanded.value = -1
+      emit('update:modelValue', (props.defaultModels || []).map(normEntry))
     }
     const fetchModels = async () => {
       probing.value = true
       try {
         const r = await post('/wb/ai-providers/probe-models',
           { base_url: props.baseUrl, protocol: props.protocol, api_key: props.apiKey })
-        emit('update:modelValue', r.models || [])
+        expanded.value = -1
+        emit('update:modelValue', (r.models || []).map(id => ({ id, name: '', ctx: '', out: '', input: ['text'] })))
         ElMessage.success(`获取到 ${(r.models || []).length} 个可用模型`)
       } catch (e) {
         ElMessage.error(e.message)
@@ -311,26 +361,68 @@ const ModelCatalogEditor = defineComponent({
         probing.value = false
       }
     }
-    return () => h('div', { class: 'model-catalog' }, [
-      h('div', { class: 'mc-head' }, [
-        h('div', [h('div', { class: 'mc-title' }, '模型目录'),
-          h('div', { class: 'muted', style: 'font-size:12px' },
-            props.modelValue.length ? undefined : '正在使用适配器默认模型')]),
-        h('a', { class: 'mc-fetch', onClick: fetchModels },
-          probing.value ? '获取中…' : '获取可用模型'),
+
+    const renderCard = (e, i) => h('div', { class: 'mc-card' }, [
+      h('div', { class: 'mc-card-row' }, [
+        h(ElInput, { modelValue: e.id, placeholder: '模型 ID', size: 'default',
+                     'onUpdate:modelValue': v => setEntry(i, { id: v }), class: 'mc-inp-id' }),
+        h(ElInput, { modelValue: e.name, placeholder: '显示名称', size: 'default',
+                     'onUpdate:modelValue': v => setEntry(i, { name: v }), class: 'mc-inp-name' }),
+        h('button', { class: 'mc-icon-btn push', type: 'button', title: expanded.value === i ? '收起' : '展开',
+                      onClick: () => { expanded.value = expanded.value === i ? -1 : i } },
+          [h(ElIcon, null, () => h(expanded.value === i ? ArrowUp : ArrowDown))]),
+        h('button', { class: 'mc-icon-btn danger', type: 'button', title: '删除',
+                      onClick: () => removeEntry(i) },
+          [h(ElIcon, null, () => h(Delete))]),
       ]),
-      props.modelValue.length
-        ? h('div', { class: 'mc-list' }, props.modelValue.map(m =>
-            h('span', { class: 'mc-chip', key: m }, [
-              m,
-              h('a', {
-                class: 'mc-x',
-                onClick: () => emit('update:modelValue', props.modelValue.filter(x => x !== m)),
-              }, '×'),
-            ])))
-        : h('div', { class: 'mc-empty' }, '模型选择器中将不显示任何模型；目录外 ID 仍可直接发送。'),
-      h('button', { class: 'mc-add', onClick: addModel }, '+ 添加模型'),
+      expanded.value === i ? h('div', { class: 'mc-card-more' }, [
+        h('div', { class: 'mc-grid' }, [
+          h('div', { class: 'mc-field' }, [
+            h('div', { class: 'mc-field-label' }, '上下文窗口'),
+            h(ElInput, { modelValue: e.ctx, placeholder: '256K', size: 'default',
+                         'onUpdate:modelValue': v => setEntry(i, { ctx: v }) }),
+          ]),
+          h('div', { class: 'mc-field' }, [
+            h('div', { class: 'mc-field-label' }, '最大输出 token 数'),
+            h(ElInput, { modelValue: e.out, placeholder: '32K', size: 'default',
+                         'onUpdate:modelValue': v => setEntry(i, { out: v }) }),
+          ]),
+        ]),
+        h('div', { class: 'mc-field mc-field-checks' }, [
+          h('div', { class: 'mc-field-label' }, '输入类型'),
+          h('div', { class: 'mc-checks' }, [
+            h(ElCheckbox, { modelValue: (e.input || []).includes('text'), label: '文本',
+                            'onUpdate:modelValue': v => toggleInput(i, 'text', v) }),
+            h(ElCheckbox, { modelValue: (e.input || []).includes('image'), label: '图片',
+                            'onUpdate:modelValue': v => toggleInput(i, 'image', v) }),
+          ]),
+        ]),
+      ]) : null,
     ])
+
+    return () => {
+      const list = entries()
+      const badIdx = list.findIndex(e => !String(e.id || '').trim())
+      return h('div', { class: 'model-catalog' }, [
+        h('div', { class: 'mc-head' }, [
+        h('div', [h('div', { class: 'mc-title' }, '模型目录'),
+          h('div', { class: 'mc-title-sub' },
+            list.length ? '已自定义模型目录' : '正在使用适配器默认模型')]),
+          h('div', { class: 'mc-actions' }, [
+            (props.defaultModels || []).length
+              ? h('a', { class: 'mc-fetch', onClick: restoreDefaults }, '恢复默认模型')
+              : null,
+            h('a', { class: 'mc-fetch', onClick: fetchModels },
+              probing.value ? '获取中…' : '获取可用模型'),
+          ]),
+        ]),
+        list.length
+          ? h('div', { class: 'mc-cards' }, list.map(renderCard))
+          : h('div', { class: 'mc-empty' }, '模型选择器中将不显示任何模型；目录外 ID 仍可直接发送。'),
+        h('button', { class: 'mc-add', type: 'button', onClick: addModel }, '+ 添加模型'),
+        badIdx >= 0 ? h('div', { class: 'mc-err' }, `模型 ${badIdx + 1}: 模型 ID 不能为空。`) : null,
+      ])
+    }
   },
 })
 
@@ -471,6 +563,17 @@ async function saveSetting(row) {
   load()
 }
 
+async function removeSetting(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除配置「${row.setting_key}」吗？删除后该配置将回落为未配置状态，可重新添加。`,
+      '删除配置', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+  } catch (e) { return }
+  await del(`/wb/settings?setting_key=${encodeURIComponent(row.setting_key)}`)
+  ElMessage.success('已删除')
+  load()
+}
+
 async function testConn(row) {
   const provider = row.setting_key.split('.')[1]
   testing.value = row.setting_key
@@ -489,7 +592,8 @@ const providers = ref([])
 const providerDialog = ref(false)
 const providerTab = ref('builtin')
 const catalog = ref([])
-const builtinAdvanced = ref('')
+const builtinAdvanced = ref('adv')
+const customAdvanced = ref('adv')
 const providerSaving = ref(false)
 const providerTesting = ref(0)
 const curCatalog = ref({})
@@ -516,12 +620,16 @@ async function openProviderDialog() {
 function onCatalogChange(slug) {
   curCatalog.value = catalog.value.find(c => c.slug === slug) || {}
   builtinForm.value.base_url = curCatalog.value.base_url || ''
-  builtinForm.value.models = [...(curCatalog.value.models || [])]
+  // 切换提供商时不预填默认模型，目录保持为空（可通过"恢复默认模型"一键取回）
+  builtinForm.value.models = []
 }
 
 async function saveBuiltinProvider() {
   const c = curCatalog.value
   if (!c.slug) { ElMessage.warning('请选择提供商'); return }
+  if (builtinForm.value.models.some(m => !modelId(m).trim())) {
+    ElMessage.error('模型目录中存在未填写模型 ID 的条目，请补全或删除'); return
+  }
   providerSaving.value = true
   try {
     await post('/wb/ai-providers', {
@@ -550,6 +658,9 @@ async function saveCustomProvider() {
   if (!f.provider_id || !f.base_url) {
     ElMessage.warning('请填写 Provider ID 与 API 地址')
     return
+  }
+  if (f.models.some(m => !modelId(m).trim())) {
+    ElMessage.error('模型目录中存在未填写模型 ID 的条目，请补全或删除'); return
   }
   providerSaving.value = true
   try {
@@ -610,21 +721,53 @@ async function removeProvider(row) {
 .env-hint { font-size: 12px; color: #d97706; margin-top: 4px; }
 .env-hint.ok { color: #16a34a; }
 .q-mark { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-left: 4px; border-radius: 50%; border: 1px solid #c0c4cc; color: #909399; font-size: 10px; cursor: help; }
-.adv-collapse { border: none; margin-bottom: 8px; }
-.adv-collapse :deep(.el-collapse-item__header) { font-weight: 600; font-size: 13px; color: #374151; border-bottom: 1px solid #eef1f6; }
-.adv-collapse :deep(.el-collapse-item__wrap) { border-bottom: none; }
-.model-catalog { margin-top: 4px; }
-.mc-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
-.mc-title { font-weight: 600; font-size: 13px; color: #374151; }
-.mc-fetch { color: #94a3b8; font-size: 12px; cursor: pointer; }
-.mc-fetch:hover { color: var(--wb-accent, #2563eb); }
-.mc-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-.mc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; background: #f1f5f9; border-radius: 6px; font-size: 12px; color: #334155; }
-.mc-x { color: #94a3b8; cursor: pointer; margin-left: 2px; }
-.mc-x:hover { color: #dc2626; }
-.mc-empty { border: 1px dashed #d7dce5; border-radius: 8px; padding: 18px; text-align: center; color: #9ca3af; font-size: 12px; margin-bottom: 10px; }
-.mc-add { padding: 5px 12px; background: #fff; border: 1px solid #d7dce5; border-radius: 8px; font-size: 12px; color: #374151; cursor: pointer; }
-.mc-add:hover { border-color: var(--wb-accent, #2563eb); color: var(--wb-accent, #2563eb); }
+.adv-collapse { border: none; margin-top: 2px; }
+.adv-collapse :deep(.el-collapse-item__header) {
+  font-weight: 600; font-size: 13px; color: #374151;
+  border-bottom: none; height: 34px; line-height: 34px;
+}
+.adv-collapse :deep(.el-collapse-item__header .el-collapse-item__arrow) { color: #6b7280; }
+.adv-collapse :deep(.el-collapse-item__wrap) { border-bottom: none; background: transparent; }
+.adv-collapse :deep(.el-collapse-item__content) { padding: 4px 0 10px; }
+.adv-divider { height: 1px; background: #eef1f6; margin: 4px 0 16px; }
+
+.pd-title { font-size: 16px; font-weight: 600; color: #111827; }
+.pd-desc { font-size: 13px; color: #6b7280; margin: 10px 0 16px; line-height: 1.6; }
+.pd-field-hint { font-size: 12px; color: #9ca3af; margin-top: 4px; line-height: 1.5; }
+
+/* 分段式胶囊 Tab */
+.seg-tabs {
+  display: inline-flex; padding: 4px; border-radius: 10px;
+  background: #eef0f4; gap: 2px;
+}
+.seg-btn {
+  border: none; background: transparent; padding: 8px 20px; border-radius: 8px;
+  font-size: 13px; color: #4b5563; cursor: pointer; transition: all .15s ease;
+  font-family: inherit;
+}
+.seg-btn:hover { color: #111827; }
+.seg-btn.active {
+  background: #fff; color: #111827; font-weight: 500;
+  box-shadow: 0 1px 3px rgba(17, 24, 39, 0.1), 0 0 1px rgba(17, 24, 39, 0.08);
+}
+
+/* 弹窗表单细节 */
+.pd-form :deep(.el-form-item__label) { font-weight: 600; color: #111827; font-size: 13px; padding-bottom: 6px; }
+.pd-form :deep(.el-input__wrapper), .pd-form :deep(.el-select__wrapper) { border-radius: 8px; box-shadow: 0 0 0 1px #e2e6ee inset; }
+.pd-form :deep(.el-input__wrapper:hover), .pd-form :deep(.el-select__wrapper:hover) { box-shadow: 0 0 0 1px #c6ccd8 inset; }
+
+/* 页脚按钮 */
+.pd-footer { display: flex; justify-content: flex-end; gap: 10px; }
+.btn-ghost {
+  background: #fff; border: 1px solid #d7dce5; border-radius: 8px;
+  color: #374151; font-weight: 500;
+}
+.btn-ghost:hover { border-color: #b9c0cc; color: #111827; background: #f9fafb; }
+.btn-dark {
+  background: #1f2329; border: 1px solid #1f2329; border-radius: 8px;
+  color: #fff; font-weight: 500;
+}
+.btn-dark:hover, .btn-dark:focus { background: #33383f; border-color: #33383f; color: #fff; }
 .usage-cards { display: flex; gap: 12px; flex-wrap: wrap; }
 .u-card {
   flex: 1; min-width: 120px; padding: 14px 16px; border-radius: 10px;
@@ -632,4 +775,54 @@ async function removeProvider(row) {
 }
 .u-num { font-size: 22px; font-weight: 700; color: var(--wb-accent, #2563eb); }
 .u-label { font-size: 12px; color: #6b7280; margin-top: 4px; }
+</style>
+
+<style>
+/* 全局样式：新增模型提供商弹窗。
+   el-dialog 会被传送到 body，.el-dialog 元素上没有 scoped 作用域属性，
+   scoped + :deep 选择器全部失配，因此弹窗骨架与模型目录样式必须全局定义。 */
+.el-dialog.provider-dialog { border-radius: 14px; overflow: hidden; }
+.provider-dialog .el-dialog__header { padding: 18px 24px 6px; margin-right: 0; }
+.provider-dialog .el-dialog__body { padding: 6px 24px 4px; }
+.provider-dialog .el-dialog__footer { padding: 8px 24px 20px; }
+
+/* ---------- 模型目录编辑器 ---------- */
+.provider-dialog .model-catalog { margin-top: 4px; }
+.provider-dialog .mc-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+.provider-dialog .mc-title { font-weight: 600; font-size: 13px; color: #111827; }
+.provider-dialog .mc-title-sub { font-size: 12px; color: #9ca3af; margin-top: 2px; }
+.provider-dialog .mc-actions { display: flex; align-items: center; gap: 18px; flex-shrink: 0; margin-left: 16px; }
+.provider-dialog .mc-fetch { color: #9ca3af; font-size: 13px; cursor: pointer; }
+.provider-dialog .mc-fetch:hover { color: var(--wb-accent, #2563eb); }
+.provider-dialog .mc-cards { display: flex; flex-direction: column; gap: 10px; margin-bottom: 2px; }
+.provider-dialog .mc-card { border: 1px solid #e5e9f0; border-radius: 10px; padding: 12px 14px; background: #fff; }
+.provider-dialog .mc-card-row { display: flex; align-items: center; gap: 12px; }
+.provider-dialog .mc-inp-id { flex: 1.2; }
+.provider-dialog .mc-inp-name { flex: 1; }
+.provider-dialog .mc-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border: none; background: transparent; border-radius: 6px;
+  color: #6b7280; cursor: pointer; flex-shrink: 0; transition: all .15s ease;
+  padding: 0; outline: none;
+}
+.provider-dialog .mc-icon-btn.push { margin-left: auto; }
+.provider-dialog .mc-icon-btn:hover { background: #f3f4f6; color: #111827; }
+.provider-dialog .mc-icon-btn.danger:hover { background: #fef2f2; color: #dc2626; }
+.provider-dialog .mc-card-more { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.provider-dialog .mc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.provider-dialog .mc-field-label { font-size: 12px; color: #6b7280; margin-bottom: 5px; }
+.provider-dialog .mc-checks { display: flex; align-items: center; gap: 6px; }
+.provider-dialog .mc-empty {
+  border: 1px dashed #d1d5db; border-radius: 10px; padding: 20px;
+  text-align: center; color: #9ca3af; font-size: 12px; margin-bottom: 4px;
+  background: transparent;
+}
+.provider-dialog .mc-add {
+  margin-top: 14px; padding: 7px 14px;
+  background: transparent; border: 1px solid transparent; border-radius: 8px;
+  font-size: 13px; color: #6b7280; cursor: pointer; font-family: inherit;
+  transition: all .15s ease;
+}
+.provider-dialog .mc-add:hover { background: #f3f4f6; color: #111827; }
+.provider-dialog .mc-err { color: #d97706; font-size: 12px; margin-top: 8px; }
 </style>
