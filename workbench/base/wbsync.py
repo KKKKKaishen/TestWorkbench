@@ -1037,11 +1037,19 @@ def _worker_loop():
             _status["syncing"] = True
             _push_once()
             _pull_once()
-            _sync_files_once()
+            down = _sync_files_once()[1]
             _status["online"] = True
             _status["last_error"] = None
             _status["last_sync_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             fail_streak = 0
+            # 本轮拉回了新的附件/知识文件时，检查是否有滞留在排队的知识文档需要处理
+            # （行同步只写表、文件对账只下载文件，都不会调度文档处理）
+            if down:
+                try:
+                    from wbapi import requeue_stale_kb_files
+                    requeue_stale_kb_files()
+                except Exception:
+                    logger.exception("重排滞留知识文档失败（不影响同步）")
         except Exception as ex:
             # 循环体任何异常都不得杀死线程（此前 enable 重写状态表与读取竞态会导致线程静默死亡）
             _status["online"] = False

@@ -65,11 +65,23 @@ def build_database_url() -> str:
 
 def _create_engine(database_url: str) -> Engine:
     if database_url.startswith("sqlite"):
-        return create_engine(
+        eng = create_engine(
             database_url,
-            connect_args={"check_same_thread": False},
+            # busy_timeout: SQLite 默认 5s，云同步周期持锁时后台写入容易撞锁报错
+            connect_args={"check_same_thread": False, "timeout": 30},
             echo=False,
         )
+
+        @event.listens_for(eng, "connect")
+        def _sqlite_tuning(dbapi_conn, _record):
+            cur = dbapi_conn.cursor()
+            # WAL：读写不互斥——长读事务（同步推送/拉取）不再阻塞写入提交
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.close()
+
+        return eng
 
     return create_engine(
         database_url,

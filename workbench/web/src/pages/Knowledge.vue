@@ -61,7 +61,7 @@
         <el-table-column label="操作" width="190">
           <template #default="{ row }">
             <div class="op-line">
-              <el-button v-if="row.status === 'failed'" link type="primary" size="small" @click="retryFile(row)">重试</el-button>
+              <el-button v-if="row.status === 'failed' || row.status === 'pending'" link type="primary" size="small" @click="retryFile(row)">重试</el-button>
               <el-button v-if="row.status === 'completed'" link type="primary" size="small" @click="reindexFile(row)">重建索引</el-button>
               <el-button link type="danger" size="small" @click="removeFile(row)">删除</el-button>
             </div>

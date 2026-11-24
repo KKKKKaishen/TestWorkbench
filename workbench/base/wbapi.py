@@ -3520,9 +3520,22 @@ def _load_wb_document(file_path: str):
     return [Document(page_content=c, metadata={"source": source}) for c in chunks if c.strip()]
 
 
+_KB_INFLIGHT: set[str] = set()   # 正在后台处理的知识文档 id（防重复调度）
+
+
 def _process_wb_document(file_id: str, kb_id: str):
     """后台处理工作坊知识文档：解析 → 分块 → MySQL 分块表（关键词检索通道）
     + 向量化入 Chroma（语义检索通道，配置 Embedding Key 后启用）。"""
+    if file_id in _KB_INFLIGHT:
+        return
+    _KB_INFLIGHT.add(file_id)
+    try:
+        _process_wb_document_inner(file_id, kb_id)
+    finally:
+        _KB_INFLIGHT.discard(file_id)
+
+
+def _process_wb_document_inner(file_id: str, kb_id: str):
     import logging as _logging
 
     from models.knowledge_models import KnowledgeBase, KnowledgeFile
@@ -3604,6 +3617,57 @@ def _process_wb_document_in_pool(file_id: str, kb_id: str):
     from services.knowledge_service import get_document_pool
 
     get_document_pool().submit(_process_wb_document, file_id, kb_id).result()
+
+
+_RESTART_FAILED_MSG = "处理因服务重启中断，请重试"
+
+
+def requeue_stale_kb_files(max_age_s: int = 90,
+                           include_restart_failed: bool = False) -> int:
+    """把长时间停留在 pending 的知识文档重新调度后台处理（非阻塞提交）。
+
+    覆盖两类场景：
+    1. 处理任务失败且连"标记失败"的写入都没成功的记录（如旧库无 WAL 时撞上
+       云同步周期持锁，报 database is locked）——记录永远停在排队中；
+    2. 云同步拉回的记录（行同步只写表、文件对账只下载文件，都不会调度处理）。
+    启动时（include_restart_failed=True）同时重排"因重启中断"的 failed 记录。
+    返回本次调度的文档数。"""
+    import logging as _logging
+    from datetime import datetime, timedelta
+
+    from models.database import create_session
+    from models.knowledge_models import KnowledgeFile
+    from services.knowledge_service import get_document_pool, resolve_upload_path
+    from sqlalchemy import and_, or_
+
+    _log = _logging.getLogger("wb.knowledge")
+    db = create_session()
+    scheduled = 0
+    try:
+        # SQLite 的 CURRENT_TIMESTAMP 存 UTC，MySQL 的 NOW() 存本地时间，分别对齐
+        now_fn = datetime.utcnow if db.get_bind().dialect.name == "sqlite" else datetime.now
+        cutoff = now_fn() - timedelta(seconds=max_age_s)
+        pending_cond = and_(KnowledgeFile.status == "pending",
+                            KnowledgeFile.uploaded_at.isnot(None),
+                            KnowledgeFile.uploaded_at < cutoff)
+        conds = pending_cond
+        if include_restart_failed:
+            conds = or_(pending_cond,
+                        and_(KnowledgeFile.status == "failed",
+                             KnowledgeFile.error == _RESTART_FAILED_MSG))
+        rows = db.query(KnowledgeFile).filter(conds).all()
+        for fr in rows:
+            if fr.id in _KB_INFLIGHT:
+                continue
+            if not resolve_upload_path(fr.file_path).exists():
+                continue  # 文件尚未同步到本机，下轮再看
+            get_document_pool().submit(_process_wb_document, fr.id, fr.knowledge_base_id)
+            scheduled += 1
+        if scheduled:
+            _log.info("已重新调度 %d 个滞留在排队的知识文档", scheduled)
+        return scheduled
+    finally:
+        db.close()
 
 
 class KnowledgeSearchBody(BaseModel):
