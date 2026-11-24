@@ -13,9 +13,13 @@ tar xzf /root/wb-cloud-bundle.tar.gz -C $INSTALL_DIR
 
 echo "== 2. MySQL =="
 MYSQL_ROOT_PWD="${MYSQL_ROOT_PWD:?需要 MYSQL_ROOT_PWD 环境变量}"
-DB_PASS=$(openssl rand -hex 16)
+# 复用已有 .env 的数据库密码（重复部署时不更换，避免与 MySQL 用户失配）
+DB_PASS=$(grep -oP '(?<=DATABASE_URL=mysql\+pymysql://wbcloud:)[^@]+' $INSTALL_DIR/app/data/.env 2>/dev/null || true)
+if [ -z "$DB_PASS" ]; then
+  DB_PASS=$(openssl rand -hex 16)
+fi
 mysql -uroot -p"$MYSQL_ROOT_PWD" -e "CREATE DATABASE IF NOT EXISTS workbench_cloud CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
-mysql -uroot -p"$MYSQL_ROOT_PWD" -e "CREATE USER IF NOT EXISTS 'wbcloud'@'localhost' IDENTIFIED BY '$DB_PASS';" 2>/dev/null
+mysql -uroot -p"$MYSQL_ROOT_PWD" -e "CREATE USER IF NOT EXISTS 'wbcloud'@'localhost' IDENTIFIED BY '$DB_PASS'; ALTER USER 'wbcloud'@'localhost' IDENTIFIED BY '$DB_PASS';" 2>/dev/null
 mysql -uroot -p"$MYSQL_ROOT_PWD" -e "GRANT ALL PRIVILEGES ON workbench_cloud.* TO 'wbcloud'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null
 # 存量实例已按低内存配置（buffer_pool=128M），此处不再改全局配置重启
 
@@ -28,8 +32,11 @@ python3 -m venv venv
 ./venv/bin/pip install -q -r ../requirements-lite.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 echo "== 4. 配置 =="
-SYNC_TOKEN=$(openssl rand -hex 24)
-SESSION_KEY=$(openssl rand -hex 32)
+# 复用已有同步令牌 / 会话密钥（重复部署不换，客户端无需重新配置）
+OLD_TOKEN=$(grep -oP '(?<=WB_SYNC_TOKEN=).*' $INSTALL_DIR/app/data/.env 2>/dev/null || true)
+OLD_SESSION=$(grep -oP '(?<=SESSION_SECRET_KEY=).*' $INSTALL_DIR/app/data/.env 2>/dev/null || true)
+SYNC_TOKEN=${OLD_TOKEN:-$(openssl rand -hex 24)}
+SESSION_KEY=${OLD_SESSION:-$(openssl rand -hex 32)}
 mkdir -p $INSTALL_DIR/app/data/uploads $INSTALL_DIR/app/data/logs
 cat > $INSTALL_DIR/app/data/.env <<EOF
 DATABASE_URL=mysql+pymysql://wbcloud:$DB_PASS@localhost:3306/workbench_cloud?charset=utf8mb4
@@ -48,7 +55,8 @@ echo "== 5. systemd =="
 sed -i "s|__INSTALL_DIR__|$INSTALL_DIR|g" /root/../$INSTALL_DIR/wb-cloud.service 2>/dev/null || true
 sed -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" -e "s|__SERVICE__|$SERVICE_NAME|g" $INSTALL_DIR/wb-cloud.service > /etc/systemd/system/$SERVICE_NAME.service
 systemctl daemon-reload
-systemctl enable --now $SERVICE_NAME
+systemctl enable $SERVICE_NAME
+systemctl restart $SERVICE_NAME   # 强制重启以加载最新 .env（enable --now 对已运行服务不生效）
 sleep 3
 systemctl --no-pager -l status $SERVICE_NAME | head -8 || true
 curl -s -m 5 http://127.0.0.1:$PORT/wb/sync/ping -H "X-Sync-Token: $SYNC_TOKEN" && echo " <- 本机 ping OK"

@@ -72,83 +72,54 @@
 
     <div class="card mb16">
       <div class="sync-head">
-        <div class="sec-title">AI 模型（本地大模型 / DeepSeek / GLM / Qwen）</div>
+        <div class="sec-title">AI 模型</div>
         <el-button type="primary" size="small" @click="openProviderDialog">新增模型提供商</el-button>
       </div>
       <div class="muted mb12">
-        本地大模型：填 OpenAI 兼容端点即可离线使用（Ollama 默认 http://127.0.0.1:11434/v1，LM Studio 默认 http://127.0.0.1:1234/v1）；
-        云厂商 key 加密存储（界面打码）。配置后点「测试连通」验证。
+        所有模型配置统一在下方提供商列表管理：点击「新增模型提供商」选择内置目录（OpenAI、DeepSeek、Kimi 等）
+        或自定义 OpenAI / Anthropic 兼容端点；已添加的提供商可随时「编辑」或「测试连通」。
       </div>
-      <el-table :data="aiSettings" size="small">
-        <el-table-column label="配置项" width="260">
+
+      <!-- 模型提供商（统一配置入口） -->
+      <div class="provider-sub-title">模型提供商（{{ providers.length }}）</div>
+      <el-table v-if="providers.length" :data="providers" size="small">
+        <el-table-column label="提供商" min-width="180">
           <template #default="{ row }">
-            <div>{{ row.setting_key }}</div>
-            <div class="muted" style="font-size:12px">{{ row.description }}</div>
+            <div>{{ row.display_name }}</div>
+            <div class="muted" style="font-size:12px">{{ row.provider_id }} · {{ row.kind === 'builtin' ? '内置' : '自定义' }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="值" min-width="200">
+        <el-table-column label="协议" width="190">
           <template #default="{ row }">
-            <el-input v-if="editing === row.setting_key" v-model="editValue" size="small"
-                      :placeholder="row.is_secret ? '粘贴 API key' : (row.setting_key === 'ai.local.base_url' ? 'http://127.0.0.1:11434/v1' : '模型名')"
-                      :show-password="!!row.is_secret" />
-            <span v-else>{{ row.has_value ? (row.is_secret ? '******' : row.setting_value) : '未配置' }}</span>
+            <el-tag size="small" effect="plain">{{ row.protocol_label }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="230">
+        <el-table-column prop="base_url" label="API 地址" min-width="220" show-overflow-tooltip />
+        <el-table-column label="模型目录" min-width="200">
           <template #default="{ row }">
-            <template v-if="editing === row.setting_key">
-              <el-button size="small" type="primary" @click="saveSetting(row)">保存</el-button>
-              <el-button size="small" @click="editing = ''">取消</el-button>
-            </template>
-            <template v-else>
-              <el-button size="small" link type="primary" @click="startEdit(row)">编辑</el-button>
-              <el-button size="small" link :loading="testing === row.setting_key"
-                         :disabled="row.setting_key === 'ai.local.api_key'"
-                         @click="testConn(row)">测试连通</el-button>
-              <el-button size="small" link type="danger" @click="removeSetting(row)">删除</el-button>
-            </template>
+            <el-tag v-for="m in row.models.slice(0, 3)" :key="modelId(m)" size="small" style="margin-right:4px" effect="plain">{{ modelId(m) }}</el-tag>
+            <span v-if="row.models.length > 3" class="muted">+{{ row.models.length - 3 }}</span>
+            <span v-if="!row.models.length" class="muted">未配置（目录外 ID 可直接发送）</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="200">
+          <template #default="{ row }">
+            <el-button size="small" link type="primary" @click="editProvider(row)">编辑</el-button>
+            <el-button size="small" link type="primary" :loading="providerTesting === row.id"
+                       @click="testProvider(row)">测试连通</el-button>
+            <el-button size="small" link type="danger" @click="removeProvider(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
-
-      <!-- 已配置的模型提供商 -->
-      <template v-if="providers.length">
-        <div class="provider-sub-title">模型提供商（{{ providers.length }}）</div>
-        <el-table :data="providers" size="small">
-          <el-table-column label="提供商" min-width="180">
-            <template #default="{ row }">
-              <div>{{ row.display_name }}</div>
-              <div class="muted" style="font-size:12px">{{ row.provider_id }} · {{ row.kind === 'builtin' ? '内置' : '自定义' }}</div>
-            </template>
-          </el-table-column>
-          <el-table-column label="协议" width="190">
-            <template #default="{ row }">
-              <el-tag size="small" effect="plain">{{ row.protocol_label }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="base_url" label="API 地址" min-width="220" show-overflow-tooltip />
-          <el-table-column label="模型目录" min-width="200">
-            <template #default="{ row }">
-              <el-tag v-for="m in row.models.slice(0, 3)" :key="modelId(m)" size="small" style="margin-right:4px" effect="plain">{{ modelId(m) }}</el-tag>
-              <span v-if="row.models.length > 3" class="muted">+{{ row.models.length - 3 }}</span>
-              <span v-if="!row.models.length" class="muted">未配置（目录外 ID 可直接发送）</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="160">
-            <template #default="{ row }">
-              <el-button size="small" link type="primary" :loading="providerTesting === row.id"
-                         @click="testProvider(row)">测试连通</el-button>
-              <el-button size="small" link type="danger" @click="removeProvider(row)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </template>
+      <div v-else class="muted" style="padding: 16px 0 4px">
+        暂无提供商：点击右上角「新增模型提供商」添加内置目录或自定义端点。
+      </div>
     </div>
 
     <!-- 新增模型提供商弹窗 -->
     <el-dialog v-model="providerDialog" width="680px" destroy-on-close class="provider-dialog">
       <template #header>
-        <div class="pd-title">新增模型提供商</div>
+        <div class="pd-title">{{ editingProvider ? `编辑提供商 · ${editingProvider.display_name}` : '新增模型提供商' }}</div>
       </template>
 
       <!-- 分段式胶囊 Tab -->
@@ -166,7 +137,8 @@
         </div>
         <el-form label-position="top" size="small" class="pd-form">
           <el-form-item label="提供商">
-            <el-select v-model="builtinForm.catalog_slug" style="width: 360px" @change="onCatalogChange">
+            <el-select v-model="builtinForm.catalog_slug" style="width: 360px"
+                       :disabled="!!editingProvider" @change="onCatalogChange">
               <el-option v-for="c in catalog" :key="c.slug" :value="c.slug" :label="c.name" />
             </el-select>
           </el-form-item>
@@ -178,7 +150,7 @@
               </el-tooltip>
             </template>
             <el-input v-model="builtinForm.api_key" type="password" show-password
-                      :placeholder="curCatalog.env_key ? `留空使用环境认证（${curCatalog.env_key}）` : '输入 API 密钥'" />
+                      :placeholder="builtinKeyPlaceholder" />
             <div v-if="curCatalog.env_key && !curCatalog.env_key_detected" class="env-hint">
               未检测到环境变量。请填写 API 密钥，或设置环境变量 {{ curCatalog.env_key }}。
             </div>
@@ -212,7 +184,7 @@
         </div>
         <el-form label-position="top" size="small" class="pd-form">
           <el-form-item label="Provider ID">
-            <el-input v-model="customForm.provider_id" placeholder="acme-gateway" />
+            <el-input v-model="customForm.provider_id" placeholder="acme-gateway" :disabled="!!editingProvider" />
             <div class="pd-field-hint">以小写字母开头的标识，在请求中唯一标识该提供商，并用于派生凭据名。</div>
           </el-form-item>
           <el-form-item label="显示名称">
@@ -229,7 +201,8 @@
             </el-select>
           </el-form-item>
           <el-form-item label="API 密钥">
-            <el-input v-model="customForm.api_key" type="password" show-password placeholder="输入 API 密钥" />
+            <el-input v-model="customForm.api_key" type="password" show-password
+                      :placeholder="editingProvider?.has_api_key ? '已保存，留空保持不变' : '输入 API 密钥'" />
           </el-form-item>
 
           <el-collapse v-model="customAdvanced" class="adv-collapse">
@@ -244,10 +217,9 @@
       <template #footer>
         <div class="pd-footer">
           <el-button class="btn-ghost" @click="providerDialog = false">取消</el-button>
-          <el-button v-if="providerTab === 'builtin'" class="btn-dark" :loading="providerSaving"
-                     @click="saveBuiltinProvider">保存</el-button>
-          <el-button v-else class="btn-dark" :loading="providerSaving"
-                     @click="saveCustomProvider">创建提供商</el-button>
+          <el-button class="btn-dark" :loading="providerSaving" @click="providerTab === 'builtin' ? saveBuiltinProvider() : saveCustomProvider()">
+            {{ editingProvider ? '保存' : (providerTab === 'builtin' ? '保存' : '创建提供商') }}
+          </el-button>
         </div>
       </template>
     </el-dialog>
@@ -294,7 +266,7 @@
 </template>
 
 <script setup>
-import { defineComponent, h, onMounted, onUnmounted, ref } from 'vue'
+import { computed, defineComponent, h, onMounted, onUnmounted, ref } from 'vue'
 import { ElCheckbox, ElInput, ElIcon, ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, Delete } from '@element-plus/icons-vue'
 import { get, post, put, del } from '../api'
@@ -518,73 +490,13 @@ async function syncNow() {
   ElMessage.info('已触发同步')
 }
 
-// ---------- AI 设置（既有固定行） ----------
-const aiSettings = ref([])
-const editing = ref('')
-const editValue = ref('')
-const testing = ref('')
+// ---------- AI 设置 ----------
 const usage = ref(null)
 
 async function load() {
-  const items = await get('/wb/settings?group=ai_model')
-  // 固定展示行：本地大模型三项 + 三家云厂商 key；未落库的补占位行
-  const defs = [
-    { k: 'ai.local.base_url', secret: 0, desc: '本地模型服务端点（Ollama/LM Studio/任意 OpenAI 兼容服务）' },
-    { k: 'ai.local.model', secret: 0, desc: '模型名（如 qwen2.5:7b，留空默认 qwen2.5:7b）' },
-    { k: 'ai.local.api_key', secret: 1, desc: '本地模型通常无需 key，留空即可' },
-    { k: 'ai.deepseek.api_key', secret: 1, desc: 'DeepSeek API key' },
-    { k: 'ai.glm.api_key', secret: 1, desc: '智谱 GLM API key' },
-    { k: 'ai.qwen.api_key', secret: 1, desc: '通义千问 API key' },
-  ]
-  aiSettings.value = defs.map(({ k, secret, desc }) => {
-    const found = items.find(i => i.setting_key === k)
-    return found || { setting_key: k, setting_group: 'ai_model', setting_value: '', is_secret: secret, has_value: false, description: desc }
-  })
   try {
     usage.value = await get('/wb/ai-usage-stats')
   } catch (e) { /* 统计加载失败不阻塞设置页 */ }
-}
-
-function startEdit(row) {
-  editing.value = row.setting_key
-  editValue.value = row.is_secret ? '' : (row.setting_value || '')
-}
-
-async function saveSetting(row) {
-  await put('/wb/settings', {
-    setting_key: row.setting_key,
-    setting_group: 'ai_model',
-    setting_value: editValue.value,
-    is_secret: row.is_secret,
-    description: row.description
-  })
-  ElMessage.success('已保存（加密存储）')
-  editing.value = ''
-  load()
-}
-
-async function removeSetting(row) {
-  try {
-    await ElMessageBox.confirm(
-      `确定删除配置「${row.setting_key}」吗？删除后该配置将回落为未配置状态，可重新添加。`,
-      '删除配置', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
-  } catch (e) { return }
-  await del(`/wb/settings?setting_key=${encodeURIComponent(row.setting_key)}`)
-  ElMessage.success('已删除')
-  load()
-}
-
-async function testConn(row) {
-  const provider = row.setting_key.split('.')[1]
-  testing.value = row.setting_key
-  try {
-    const r = await post(`/wb/settings/test-model?provider=${provider}`)
-    ElMessage.success(`连通成功：${r.model}（${r.latency_ms}ms）`)
-  } catch (e) {
-    ElMessage.error(e.message)
-  } finally {
-    testing.value = ''
-  }
 }
 
 // ---------- 模型提供商 ----------
@@ -597,8 +509,15 @@ const customAdvanced = ref('adv')
 const providerSaving = ref(false)
 const providerTesting = ref(0)
 const curCatalog = ref({})
+const editingProvider = ref(null)   // 编辑中的提供商行（null = 新增）
 const builtinForm = ref({ catalog_slug: 'openai', api_key: '', base_url: '', models: [] })
 const customForm = ref({ provider_id: '', display_name: '', base_url: '', protocol: 'openai_chat', api_key: '', models: [] })
+
+const builtinKeyPlaceholder = computed(() => {
+  if (editingProvider.value) return editingProvider.value.has_api_key ? '已保存，留空保持不变' : '输入 API 密钥'
+  const c = curCatalog.value
+  return c.env_key ? `留空使用环境认证（${c.env_key}）` : '输入 API 密钥'
+})
 
 async function loadProviders() {
   try {
@@ -606,15 +525,48 @@ async function loadProviders() {
   } catch (e) { /* 旧后端无此端点 */ }
 }
 
-async function openProviderDialog() {
-  providerDialog.value = true
-  providerTab.value = 'builtin'
+async function ensureCatalog() {
   if (!catalog.value.length) {
     try {
       catalog.value = await get('/wb/ai-providers/catalog')
-      onCatalogChange(builtinForm.value.catalog_slug)
     } catch (e) { /* 旧后端 */ }
   }
+}
+
+async function openProviderDialog() {
+  editingProvider.value = null
+  await ensureCatalog()
+  const c = catalog.value.find(x => x.slug === 'openai') || {}
+  curCatalog.value = c
+  builtinForm.value = { catalog_slug: 'openai', api_key: '', base_url: c.base_url || '', models: [] }
+  customForm.value = { provider_id: '', display_name: '', base_url: '', protocol: 'openai_chat', api_key: '', models: [] }
+  providerTab.value = 'builtin'
+  providerDialog.value = true
+}
+
+async function editProvider(row) {
+  editingProvider.value = row
+  await ensureCatalog()
+  if (row.kind === 'builtin') {
+    curCatalog.value = catalog.value.find(c => c.slug === row.catalog_slug) || {}
+    builtinForm.value = {
+      catalog_slug: row.catalog_slug || '',
+      api_key: '',
+      base_url: row.base_url || '',
+      models: (row.models || []).map(normEntry),
+    }
+  } else {
+    customForm.value = {
+      provider_id: row.provider_id,
+      display_name: row.display_name,
+      base_url: row.base_url || '',
+      protocol: row.protocol || 'openai_chat',
+      api_key: '',
+      models: (row.models || []).map(normEntry),
+    }
+  }
+  providerTab.value = row.kind === 'builtin' ? 'builtin' : 'custom'
+  providerDialog.value = true
 }
 
 function onCatalogChange(slug) {
@@ -625,27 +577,42 @@ function onCatalogChange(slug) {
 }
 
 async function saveBuiltinProvider() {
+  const editing = editingProvider.value
   const c = curCatalog.value
-  if (!c.slug) { ElMessage.warning('请选择提供商'); return }
+  if (!editing && !c.slug) { ElMessage.warning('请选择提供商'); return }
   if (builtinForm.value.models.some(m => !modelId(m).trim())) {
     ElMessage.error('模型目录中存在未填写模型 ID 的条目，请补全或删除'); return
   }
   providerSaving.value = true
   try {
-    await post('/wb/ai-providers', {
-      provider_id: c.slug,
-      display_name: c.name,
-      kind: 'builtin',
-      catalog_slug: c.slug,
-      protocol: c.protocol,
-      base_url: builtinForm.value.base_url || c.base_url || '',
-      api_key: builtinForm.value.api_key || '',
-      models: builtinForm.value.models,
-    })
-    ElMessage.success(`已添加提供商：${c.name}`)
+    if (editing) {
+      await put(`/wb/ai-providers/${editing.id}`, {
+        provider_id: editing.provider_id,
+        display_name: editing.display_name,
+        kind: 'builtin',
+        catalog_slug: editing.catalog_slug,
+        protocol: (c.protocol || editing.protocol || 'openai_chat'),
+        base_url: builtinForm.value.base_url || '',
+        api_key: builtinForm.value.api_key || '',
+        models: builtinForm.value.models,
+        enabled: editing.enabled,
+      })
+      ElMessage.success('已保存修改')
+    } else {
+      await post('/wb/ai-providers', {
+        provider_id: c.slug,
+        display_name: c.name,
+        kind: 'builtin',
+        catalog_slug: c.slug,
+        protocol: c.protocol,
+        base_url: builtinForm.value.base_url || c.base_url || '',
+        api_key: builtinForm.value.api_key || '',
+        models: builtinForm.value.models,
+      })
+      ElMessage.success(`已添加提供商：${c.name}`)
+    }
     providerDialog.value = false
     loadProviders()
-    load()
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -654,9 +621,14 @@ async function saveBuiltinProvider() {
 }
 
 async function saveCustomProvider() {
+  const editing = editingProvider.value
   const f = customForm.value
-  if (!f.provider_id || !f.base_url) {
+  if (!editing && (!f.provider_id || !f.base_url)) {
     ElMessage.warning('请填写 Provider ID 与 API 地址')
+    return
+  }
+  if (editing && !f.base_url) {
+    ElMessage.warning('请填写 API 地址')
     return
   }
   if (f.models.some(m => !modelId(m).trim())) {
@@ -664,19 +636,33 @@ async function saveCustomProvider() {
   }
   providerSaving.value = true
   try {
-    await post('/wb/ai-providers', {
-      provider_id: f.provider_id.trim(),
-      display_name: f.display_name || f.provider_id,
-      kind: 'custom',
-      protocol: f.protocol,
-      base_url: f.base_url.trim(),
-      api_key: f.api_key || '',
-      models: f.models,
-    })
-    ElMessage.success('已创建提供商')
+    if (editing) {
+      await put(`/wb/ai-providers/${editing.id}`, {
+        provider_id: editing.provider_id,
+        display_name: f.display_name || editing.display_name,
+        kind: 'custom',
+        catalog_slug: editing.catalog_slug,
+        protocol: f.protocol,
+        base_url: f.base_url.trim(),
+        api_key: f.api_key || '',
+        models: f.models,
+        enabled: editing.enabled,
+      })
+      ElMessage.success('已保存修改')
+    } else {
+      await post('/wb/ai-providers', {
+        provider_id: f.provider_id.trim(),
+        display_name: f.display_name || f.provider_id,
+        kind: 'custom',
+        protocol: f.protocol,
+        base_url: f.base_url.trim(),
+        api_key: f.api_key || '',
+        models: f.models,
+      })
+      ElMessage.success('已创建提供商')
+    }
     providerDialog.value = false
     loadProviders()
-    load()
   } catch (e) {
     ElMessage.error(e.message)
   } finally {

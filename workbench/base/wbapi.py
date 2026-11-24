@@ -2510,20 +2510,55 @@ def _local_llm_conf(db: Session) -> tuple[str, str, str] | None:
     return base_url.rstrip("/"), model, api_key
 
 
+def _provider_llm_chain(db: Session) -> list[tuple[str, str, str, str]]:
+    """从模型提供商表构建 OpenAI 兼容调用链（配置统一入口）。
+    仅纳入已启用且协议为 openai_chat 的提供商；builtin 未填地址时回落目录默认地址，
+    模型目录为空时回落目录默认模型。返回 [(provider, base_url, model, api_key)]。"""
+    out = []
+    rows = db.query(wb.WbAiProvider).filter(wb.WbAiProvider.enabled == 1)\
+        .order_by(wb.WbAiProvider.id).all()
+    for p in rows:
+        if (p.protocol or "openai_chat") != "openai_chat":
+            continue
+        base = (p.base_url or "").strip()
+        cat = None
+        if p.kind == "builtin" and p.catalog_slug:
+            cat = next((c for c in _AI_PROVIDER_CATALOG if c["slug"] == p.catalog_slug), None)
+            if not base and cat:
+                base = (cat.get("base_url") or "").strip()
+        if not base:
+            continue
+        models = [m.get("id") if isinstance(m, dict) else str(m)
+                  for m in (p.models or []) if (m.get("id") if isinstance(m, dict) else m)]
+        if not models and cat:
+            models = [m for m in (cat.get("models") or []) if m]
+        if not models:
+            continue
+        key = ""
+        if p.api_key_enc:
+            try:
+                key = _provider_cipher().decrypt(p.api_key_enc.encode()).decode()
+            except Exception:
+                key = ""
+        out.append((p.provider_id, base.rstrip("/"), models[0], key or "local"))
+    return out
+
+
 def _call_chat_llm(db: Session, scene: str, system: str, user: str, max_tokens: int = 3000) -> str:
     """通用 AI 调用（EX-M1 骨架生成 / EX-M3 失败分析共用）。
-    优先本地大模型（OpenAI 兼容端点，离线可用），再依序尝试云厂商；全未配置抛 400 提示。"""
+    优先按提供商表（设置页统一入口）依序尝试；提供商表为空时回落旧设置键。全未配置抛 400 提示。"""
     import urllib.error
     import urllib.request
 
-    providers: list[tuple[str, str, str, str]] = []  # (provider, base_url, model, api_key)
-    local = _local_llm_conf(db)
-    if local:
-        providers.append(("local", local[0], local[1], local[2]))
-    for provider, (base_url, model) in _AI_PROVIDERS.items():
-        key = _decrypt_wb_secret(db, f"ai.{provider}.api_key")
-        if key:
-            providers.append((provider, base_url, model, key))
+    providers: list[tuple[str, str, str, str]] = _provider_llm_chain(db)
+    if not providers:  # 兼容旧配置：无提供商记录时回落 legacy 设置键
+        local = _local_llm_conf(db)
+        if local:
+            providers.append(("local", local[0], local[1], local[2]))
+        for provider, (base_url, model) in _AI_PROVIDERS.items():
+            key = _decrypt_wb_secret(db, f"ai.{provider}.api_key")
+            if key:
+                providers.append((provider, base_url, model, key))
 
     last_err = None
     for provider, base_url, model, key in providers:
@@ -4256,43 +4291,6 @@ def ai_provider_list(db: Session = Depends(get_db)):
              "created_at": str(r.created_at or "")} for r in rows]
 
 
-def _apply_provider_legacy_settings(db: Session, p) -> None:
-    """把提供商配置桥接进既有设置键，使测试连通/本地模型链路等旧功能立即可用。
-
-    - 内置提供商：写 ai.{slug}.api_key（与设置页既有行对应）
-    - 自定义 OpenAI 兼容端点：写 ai.local.*（对话/工作流的本地模型链路）"""
-    key_plain = None
-    if p.api_key_enc:
-        try:
-            key_plain = _provider_cipher().decrypt(p.api_key_enc.encode()).decode()
-        except Exception:
-            key_plain = None
-
-    def _up(k, v, secret=0, desc=""):
-        if not v:
-            return
-        enc = _secret_cipher().encrypt(v.encode()).decode() if secret else v
-        row = db.query(wb.WbSetting).filter(wb.WbSetting.setting_key == k).first()
-        if row:
-            row.setting_value = enc
-            row.is_secret = secret
-            if desc:
-                row.description = desc
-        else:
-            db.add(wb.WbSetting(setting_key=k, setting_group="ai_model",
-                                setting_value=enc, is_secret=secret, description=desc))
-
-    if p.kind == "builtin" and p.catalog_slug:
-        _up(f"ai.{p.catalog_slug}.api_key", key_plain, 1, f"{p.display_name} API key")
-    elif p.kind == "custom" and p.protocol in ("openai_chat", "openai_responses"):
-        _up("ai.local.base_url", p.base_url, 0, "AI 提供商端点（自定义模型 API）")
-        _up("ai.local.api_key", key_plain, 1, "AI 提供商密钥（自定义模型 API）")
-        if p.models:
-            _first = p.models[0]
-            _first_id = _first.get("id") if isinstance(_first, dict) else _first
-            _up("ai.local.model", _first_id, 0, "AI 提供商默认模型")
-
-
 @router.post("/ai-providers")
 def ai_provider_create(body: AiProviderBody, db: Session = Depends(get_db)):
     pid = (body.provider_id or "").strip()
@@ -4319,8 +4317,6 @@ def ai_provider_create(body: AiProviderBody, db: Session = Depends(get_db)):
         models=_norm_provider_models(body.models), enabled=body.enabled)
     db.add(p)
     db.commit()
-    _apply_provider_legacy_settings(db, p)
-    db.commit()
     return {"ok": True, "id": p.id}
 
 
@@ -4337,8 +4333,6 @@ def ai_provider_update(pid: int, body: AiProviderBody, db: Session = Depends(get
     if body.models is not None:
         p.models = _norm_provider_models(body.models)
     p.enabled = body.enabled
-    db.commit()
-    _apply_provider_legacy_settings(db, p)
     db.commit()
     return {"ok": True}
 
