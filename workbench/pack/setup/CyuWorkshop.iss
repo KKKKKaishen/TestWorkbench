@@ -20,7 +20,8 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequiredOverridesAllowed=dialog commandline
 UninstallDisplayIcon={app}\CyuWorkshop.exe
-SetupIconFile=..\cyu.ico          ; 安装器 exe 自身图标（与客户端一致）
+; 安装器 exe 自身图标（与客户端一致）
+SetupIconFile=E:\Workspace\TestingTable\workbench\pack\cyu.ico
 ; 1.4GB 载荷，放宽磁盘空间要求自动计算即可
 
 [Languages]
