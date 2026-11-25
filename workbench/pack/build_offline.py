@@ -89,6 +89,7 @@ def build_shell():
     run([
         VENV_PY, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir",
         "--name", "CyuWorkshop", "--windowed",
+        "--icon", PACK / "cyu.ico",  # 客户端 exe 图标（任务栏/资源管理器/桌面快捷方式）
         "--distpath", SHELL_BUILD, "--workpath", PACK / "build" / "shell",
         "--specpath", PACK / "build" / "shell",
         PACK / "run_shell.py",
